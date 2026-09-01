@@ -94,6 +94,12 @@ def ensure_additive_schema():
         "book_loans": [
             ("student_id", "VARCHAR"),
         ],
+        "hostel_rooms": [
+            ("campus", "VARCHAR DEFAULT ''"),
+        ],
+        "hostel_allocations": [
+            ("campus", "VARCHAR DEFAULT ''"),
+        ],
     }
 
     with engine.begin() as conn:
@@ -106,6 +112,27 @@ def ensure_additive_schema():
                 if column_name in existing:
                     continue
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
+        # Older hostel rows pre-date campus ownership.  Room inventory in the
+        # original seed belongs to Main Campus; allocation rows can only be
+        # backfilled when they are linked to an actual student record.
+        if inspector.has_table("hostel_rooms"):
+            conn.execute(text("UPDATE hostel_rooms SET campus = 'Main Campus' WHERE campus IS NULL OR campus = ''"))
+        if inspector.has_table("hostel_allocations") and inspector.has_table("students"):
+            if conn.dialect.name == "postgresql":
+                conn.execute(text("""
+                    UPDATE hostel_allocations AS allocation
+                    SET campus = students.campus
+                    FROM students
+                    WHERE allocation.student_id = students.id
+                      AND (allocation.campus IS NULL OR allocation.campus = '')
+                """))
+            else:
+                conn.execute(text("""
+                    UPDATE hostel_allocations
+                    SET campus = (SELECT campus FROM students WHERE students.id = hostel_allocations.student_id)
+                    WHERE (campus IS NULL OR campus = '')
+                      AND student_id IN (SELECT id FROM students)
+                """))
 
 
 def office(n: int) -> dict:

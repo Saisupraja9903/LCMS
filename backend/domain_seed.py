@@ -1771,7 +1771,7 @@ def _seed_core_domain(s):
         for rn in range(101, 121):
             rid = f"room_{block[0].lower()}{rn}"
             room_ids.append(rid)
-            s.add(D.HostelRoom(id=rid, tenant_id=TENANT, block=block,
+            s.add(D.HostelRoom(id=rid, tenant_id=TENANT, campus=CAMPUS_SCOPES[0], block=block,
                                room_no=str(rn), capacity=2, occupied=R.randint(0, 2)))
     s.flush()
     for i in range(1, 16):
@@ -2569,7 +2569,7 @@ def _bind_portal_accounts(s):
                 _ensure(
                     s, D.HostelAllocation, f"halloc_bound_{pick.id}",
                     lambda pick=pick, any_room=any_room: D.HostelAllocation(
-                        id=f"halloc_bound_{pick.id}", tenant_id=TENANT,
+                        id=f"halloc_bound_{pick.id}", tenant_id=TENANT, campus=pick.campus,
                         room_id=any_room.id, student_id=pick.id,
                         student_name=pick.name, status="requested"
                     ),
@@ -3278,6 +3278,35 @@ def _seed_development_principal_coverage(s):
     s.commit()
 
 
+def _seed_principal_compliance_requirements(s):
+    """Deterministic operational records derived from the current compliance areas."""
+    records = [
+        ("comp_req_01", "COMP-2026-001", "Statutory compliance evidence review", "regulatory", "IQAC", "high", date(2026, 9, 30), "Statutory register and filing acknowledgement", "wf_comp_01"),
+        ("comp_req_02", "COMP-2026-002", "Accreditation self-study evidence review", "quality", "IQAC", "high", date(2026, 10, 15), "Accreditation self-study repository", "wf_comp_02"),
+        ("comp_req_03", "COMP-2026-003", "Policies and SOPs annual review", "policy", "Administration", "normal", date(2026, 10, 31), "Approved policy register", "wf_comp_03"),
+        ("comp_req_04", "COMP-2026-004", "Audit and risk closure review", "risk", "Internal Audit", "critical", date(2026, 9, 20), "Risk register and closure evidence", "wf_comp_04"),
+    ]
+    proc = next(item for item in APPROVAL_MATRIX if item["key"] == "compliance_requirement")
+    for req_id, reference, title, category, department, priority, due_date, evidence, workflow_id in records:
+        _ensure(s, WorkflowInstance, workflow_id,
+                lambda workflow_id=workflow_id, title=title: WorkflowInstance(
+                    id=workflow_id, tenant_id=TENANT, process_key=proc["key"], label=proc["label"],
+                    office_n=4, title=title, state="submitted", amount=None, initiator_id="user_9",
+                    initiator_name="Dean R&D / IQAC", current_stage=2, scope_level="campus", escalated=False))
+    # Requirements reference the workflows directly; persist those parents first.
+    s.flush()
+    for req_id, reference, title, category, department, priority, due_date, evidence, workflow_id in records:
+        _ensure(s, D.ComplianceRequirement, req_id,
+                lambda req_id=req_id, reference=reference, title=title, category=category,
+                department=department, priority=priority, due_date=due_date, evidence=evidence,
+                workflow_id=workflow_id: D.ComplianceRequirement(
+                    id=req_id, tenant_id=TENANT, campus="Main Campus", reference_code=reference,
+                    title=title, description="Operational compliance requirement routed through the ICMS approval workflow.",
+                    category=category, responsible_department=department, priority=priority,
+                    due_date=due_date, evidence_reference=evidence, workflow_id=workflow_id))
+    s.commit()
+
+
 def seed_domain():
     ensure_additive_schema()
     s = SessionLocal()
@@ -3286,6 +3315,7 @@ def seed_domain():
         _seed_reference_extensions(s)
         _seed_calendar_data(s)
         _seed_chairman_workflows(s)
+        _seed_principal_compliance_requirements(s)
         _bind_portal_accounts(s)
         _seed_student_portal_demo_profile(s)
         _seed_principal_dashboard_data(s)

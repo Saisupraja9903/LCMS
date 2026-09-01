@@ -16,11 +16,11 @@ from sqlalchemy import and_, desc, func, or_
 from core import db, auth, uid, write_audit, notify, active_delegation_for
 from database import office, TENANT, slug
 from authority import authorize, ALLOW
-from matrices import rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS
+from matrices import rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS, APPROVAL_MATRIX
 from capabilities import (modules_for_office, module_meta, MODULE_ACTIONS,
                           MODULES, action_allowed_for_office)
 import domain_models as D
-from models import User, Person, OrgScope, WorkflowInstance, Notification
+from models import User, Person, OrgScope, WorkflowInstance, WorkflowProfile, Approval, Notification
 
 router = APIRouter(prefix="/api")
 
@@ -176,15 +176,15 @@ def overview(ctx=Depends(auth), s=Depends(db)):
 def principal_overview(academic_year: str = "", student_semester: str = "", ctx=Depends(auth), s=Depends(db)):
     """Branch-leadership dashboard aggregates, calculated only from domain records."""
     require(gate(s, ctx, "analytics", "view")[0])
-    terms = [row[0] for row in s.query(D.AcademicCalendarEntry.term).distinct().all() if row[0]]
-    def academic_year_for(term):
-        try:
-            y = int(str(term)[:4])
-            return f"{y - 1 if str(term).lower().endswith('even') else y}-{str((y if str(term).lower().endswith('even') else y + 1))[-2:]}"
-        except (TypeError, ValueError): return ""
-    years = sorted(set(filter(None, (academic_year_for(t) for t in terms))), reverse=True)
-    selected_year = academic_year if academic_year in years else (years[0] if years else "")
-    student_query = s.query(D.Student).filter(D.Student.status == "active")
+    # Batches are the same academic-year dimension used by the student risk
+    # register. Keeping this source shared makes the dashboard drill-down exact.
+    student_query = _student_scope(s.query(D.Student).filter(D.Student.status == "active"), ctx)
+    scoped_students = student_query.all()
+    years = sorted({_academic_year_label(row.batch) for row in scoped_students if row.batch}, reverse=True)
+    selected_year = academic_year if academic_year in years else ("2026-27" if "2026-27" in years else (years[0] if years else ""))
+    if selected_year:
+        batches = [row.batch for row in scoped_students if _academic_year_label(row.batch) == selected_year]
+        student_query = student_query.filter(D.Student.batch.in_(batches))
     try:
         selected_student_semester = int(student_semester) if student_semester else 0
     except (TypeError, ValueError):
@@ -209,6 +209,9 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
         next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
         rows = [r for r in attendance if month <= r.on_date < next_month]
         trend.append({"label": month.strftime("%b"), "value": round(100 * sum(1 for r in rows if r.present) / len(rows), 1) if rows else None})
+    risk_backlogs = _backlog_summary(s, student_ids)
+    attendance_totals = _attendance_totals(s, student_ids)
+    risk_ids = {row.id for row in students if _student_risk_payload(row, risk_backlogs[row.id], attendance_totals)["at_risk"]}
     cgpas = [row.cgpa or 0 for row in students]
     avg_cgpa = round(sum(cgpas) / len(cgpas), 2) if cgpas else 0
     pass_rate = round(100 * sum(1 for x in cgpas if x >= 4.5) / len(cgpas), 1) if cgpas else None
@@ -220,11 +223,11 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
     notifications = s.query(Notification).filter(Notification.user_id == ctx["sub"]).order_by(desc(Notification.created_at)).limit(6).all()
     return {
         "filters": {"academic_years": years, "selected_year": selected_year, "selected_student_semester": selected_student_semester, "student_semesters": list(range(1, 9))},
-        "kpis": {"students": len(students), "faculty": s.query(D.StaffMember).filter(D.StaffMember.status == "active").count(), "attendance": attendance_pct, "decisions": len(pending_workflows), "risk_students": sum(1 for x in cgpas if x < 6), "critical_alerts": sum(1 for n in notifications if n.severity == "critical")},
+        "kpis": {"students": len(students), "faculty": s.query(D.StaffMember).filter(D.StaffMember.status == "active").count(), "attendance": attendance_pct, "decisions": len(pending_workflows), "risk_students": len(risk_ids), "critical_alerts": sum(1 for n in notifications if n.severity == "critical")},
         "attendance": {"today": attendance_pct, "today_records": len(today_rows), "trend": trend},
-        "performance": {"average_cgpa": avg_cgpa, "pass_rate": pass_rate, "bands": bands, "at_risk": sum(1 for x in cgpas if x < 6), "backlogs": sum(1 for x in cgpas if x < 4.5)},
+        "performance": {"average_cgpa": avg_cgpa, "pass_rate": pass_rate, "bands": bands, "at_risk": len(risk_ids), "backlogs": sum(1 for item in risk_backlogs.values() if item["current"] > 0)},
         "examinations": {"sections": s.query(D.Section).count(), "assessments": assessments, "marks_submitted": marks, "pending_moderation": s.query(D.ResultSheet).filter(D.ResultSheet.status != "published").count()},
-        "welfare": {"at_risk": sum(1 for x in cgpas if x < 6), "grievances": s.query(D.Complaint).filter(D.Complaint.kind == "Grievance", D.Complaint.status != "resolved").count(), "discipline": s.query(D.Complaint).filter(D.Complaint.kind == "Discipline", D.Complaint.status != "resolved").count(), "critical": s.query(D.Complaint).filter(D.Complaint.severity == "high", D.Complaint.status != "resolved").count()},
+        "welfare": {"at_risk": len(risk_ids), "grievances": s.query(D.Complaint).filter(D.Complaint.kind == "Grievance", D.Complaint.status != "resolved").count(), "discipline": s.query(D.Complaint).filter(D.Complaint.kind == "Discipline", D.Complaint.status != "resolved").count(), "critical": s.query(D.Complaint).filter(D.Complaint.severity == "high", D.Complaint.status != "resolved").count()},
         "operations": {"maintenance": asset_maintenance, "procurement": 0, "asset_requests": asset_maintenance, "facilities": asset_maintenance},
         "workflows": [{"id": w.id, "title": w.title, "label": w.process_key.replace('_', ' ').title(), "state": w.state, "initiator": w.initiator_name or "Request"} for w in pending_workflows[:5]],
         "notifications": [{"id": n.id, "title": n.title, "severity": n.severity, "created_at": n.created_at.isoformat()} for n in notifications],
@@ -1168,12 +1171,34 @@ def _backlog_summary(s, student_ids):
     return output
 
 
+def _student_risk_payload(student, backlog, attendance):
+    """One authoritative, explainable risk evaluation for dashboard/list/detail."""
+    reasons = []
+    attendance_pct = None
+    if student.id in attendance:
+        present, total = attendance[student.id]
+        attendance_pct = round(100 * present / total, 1) if total else None
+        if attendance_pct is not None and attendance_pct < 75:
+            reasons.append("Attendance below 75%")
+    if (student.cgpa or 0) < 6.5:
+        reasons.append("CGPA below 6.5")
+    if backlog.get("current", 0) > 0:
+        reasons.append("Active examination backlog")
+    return {"at_risk": bool(reasons), "risk_level": "At Risk" if reasons else "Normal",
+            "risk_reasons": reasons, "attendance_pct": attendance_pct}
+
+
 @router.get("/students")
 def list_students(q: str = "", dept: str = "", program: str = "", academic_year: str = "", study_year: int = Query(0, ge=0), semester: int = Query(0, ge=0), section: str = "", risk: str = "", page: int = Query(1, ge=1), page_size: int = Query(25, ge=10, le=100), ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "students", "view")[0])
     base_query = _student_scope(s.query(D.Student), ctx)
     scoped_students = base_query.all()
     query = base_query
+    # Keep Principal student analytics aligned with the dashboard's current
+    # academic-year scope when a caller does not explicitly choose a year.
+    if not academic_year and ctx.get("office_n") == 4:
+        years = {_academic_year_label(student.batch) for student in scoped_students if student.batch}
+        academic_year = "2026-27" if "2026-27" in years else (max(years) if years else "")
     if q:
         like = f"%{q}%"
         query = query.filter((D.Student.name.ilike(like)) | (D.Student.roll_no.ilike(like)) | (D.Student.email.ilike(like)))
@@ -1203,10 +1228,9 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
             query = query.filter(D.Student.id.in_([sid for sid, item in summaries.items() if item["current"] == 0]))
         else:
             attendance = _attendance_totals(s, scoped_ids)
-            at_risk_ids = [sid for sid, item in summaries.items()
-                           if item["current"] > 0
-                           or (s.query(D.Student.cgpa).filter(D.Student.id == sid).scalar() or 0) < 6.5
-                           or (sid in attendance and 100 * attendance[sid][1] / attendance[sid][0] < 75)]
+            candidates = {student.id: student for student in query.all()}
+            at_risk_ids = [sid for sid, student in candidates.items()
+                           if _student_risk_payload(student, summaries[sid], attendance)["at_risk"]]
             query = query.filter(D.Student.id.in_(at_risk_ids))
     total = query.count()
     rows = (query.order_by(D.Student.roll_no)
@@ -1214,9 +1238,6 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
             .limit(page_size).all())
     dept_map = {d.id: d for d in s.query(D.Department).all()}
     program_map = {p.id: p for p in s.query(D.Program).all()}
-    student_ids = [row.id for row in rows]
-    backlogs = _backlog_summary(s, student_ids)
-    attendance_by_student = _attendance_totals(s, student_ids)
     all_students = query.all()
     all_backlogs = _backlog_summary(s, [student.id for student in all_students])
     attendance_totals = _attendance_totals(s, [student.id for student in all_students])
@@ -1225,27 +1246,34 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
     attendance_values = []
     cgpas = []
     for student in all_students:
+        risk = _student_risk_payload(student, all_backlogs[student.id], attendance_totals)
         academic = (student.cgpa or 0) < 6.5
         current_backlogs = all_backlogs[student.id]["current"]
         if academic: risk_summary["academic_risk"] += 1
         if current_backlogs: risk_summary["backlogs"] += 1
         else: risk_summary["no_backlogs"] += 1
-        if student.id in attendance_totals:
-            pct = 100 * attendance_totals[student.id][1] / attendance_totals[student.id][0]
+        if risk["attendance_pct"] is not None:
+            pct = risk["attendance_pct"]
             attendance_values.append(pct)
             if pct < 75: risk_summary["attendance_risk"] += 1
         if student.cgpa is not None: cgpas.append(student.cgpa)
-        if academic or current_backlogs or (student.id in attendance_totals and 100 * attendance_totals[student.id][1] / attendance_totals[student.id][0] < 75): risk_summary["at_risk"] += 1
+        if risk["at_risk"]: risk_summary["at_risk"] += 1
     if attendance_values: risk_summary["average_attendance"] = round(sum(attendance_values) / len(attendance_values), 1)
     if cgpas: risk_summary["average_cgpa"] = round(sum(cgpas) / len(cgpas), 2)
-    return {"students": [{
-        "id": r.id, "roll_no": r.roll_no, "name": r.name, "email": r.email, "dept": dept_map.get(r.dept_id).code if r.dept_id in dept_map else "", "department_name": dept_map.get(r.dept_id).name if r.dept_id in dept_map else "",
-        "program": program_map.get(r.program_id).name if r.program_id in program_map else "", "program_code": program_map.get(r.program_id).code if r.program_id in program_map else "",
-        "batch": r.batch, "semester": r.semester, "section": r.section, "cgpa": r.cgpa,
-        "status": r.status, "hosteller": r.hosteller, "scholarship": r.scholarship,
-        "attendance_pct": round(100 * attendance_by_student[r.id][1] / attendance_by_student[r.id][0], 1) if r.id in attendance_by_student else None,
-        "current_backlogs": backlogs[r.id]["current"], "backlog_status": "Outstanding" if backlogs[r.id]["current"] else ("Cleared" if backlogs[r.id]["cleared"] else "No history"),
-    } for r in rows], "total": total, "page": page, "page_size": page_size,
+    page_backlogs = _backlog_summary(s, [row.id for row in rows])
+    page_attendance = _attendance_totals(s, [row.id for row in rows])
+    student_rows = []
+    for r in rows:
+        risk = _student_risk_payload(r, page_backlogs[r.id], page_attendance)
+        student_rows.append({
+            "id": r.id, "roll_no": r.roll_no, "name": r.name, "email": r.email, "dept": dept_map.get(r.dept_id).code if r.dept_id in dept_map else "", "department_name": dept_map.get(r.dept_id).name if r.dept_id in dept_map else "",
+            "program": program_map.get(r.program_id).name if r.program_id in program_map else "", "program_code": program_map.get(r.program_id).code if r.program_id in program_map else "",
+            "batch": r.batch, "semester": r.semester, "section": r.section, "cgpa": r.cgpa,
+            "status": r.status, "hosteller": r.hosteller, "scholarship": r.scholarship,
+            "current_backlogs": page_backlogs[r.id]["current"], "backlog_status": "Outstanding" if page_backlogs[r.id]["current"] else ("Cleared" if page_backlogs[r.id]["cleared"] else "No history"),
+            **risk,
+        })
+    return {"students": student_rows, "total": total, "page": page, "page_size": page_size,
         "total_pages": max(1, (total + page_size - 1) // page_size),
         "filter_options": {
             "academic_years": sorted({_academic_year_label(row.batch) for row in scoped_students if row.batch}, reverse=True),
@@ -1273,16 +1301,17 @@ def student_profile(student_id: str, ctx=Depends(auth), s=Depends(db)):
     department = s.query(D.Department).get(student.dept_id)
     program = s.query(D.Program).get(student.program_id)
     attendance = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.student_id == student.id).all()
-    attendance_pct = round(100 * sum(1 for row in attendance if row.present) / len(attendance), 1) if attendance else None
     enrollments = s.query(D.Enrollment).filter(D.Enrollment.student_id == student.id).all()
     sections = {row.id: row for row in s.query(D.Section).filter(D.Section.id.in_([e.section_id for e in enrollments])).all()} if enrollments else {}
     marks = s.query(D.Mark).filter(D.Mark.student_id == student.id).all()
     backlog = _backlog_summary(s, [student.id])[student.id]
+    risk = _student_risk_payload(student, backlog, _attendance_totals(s, [student.id]))
     return {"student": {"id": student.id, "name": student.name, "roll_no": student.roll_no, "email": student.email,
             "campus": student.campus, "department": department.name if department else "", "department_code": department.code if department else "",
             "program": program.name if program else "", "program_code": program.code if program else "", "semester": student.semester,
             "study_year": (student.semester + 1) // 2, "section": student.section, "status": student.status, "cgpa": student.cgpa,
-            "attendance_pct": attendance_pct, "current_backlogs": backlog["current"], "cleared_backlogs": backlog["cleared"]},
+            "attendance_pct": risk["attendance_pct"], "current_backlogs": backlog["current"], "cleared_backlogs": backlog["cleared"],
+            "academic_year": _academic_year_label(student.batch), **risk},
             "attendance": [{"date": row.on_date.isoformat(), "present": row.present} for row in attendance],
             "enrollments": [{"section": sections[e.section_id].section_code if e.section_id in sections else "", "term": sections[e.section_id].term if e.section_id in sections else "", "status": e.status, "grade": e.grade} for e in enrollments],
             "marks": [{"assessment_id": row.assessment_id, "score": row.score, "entered_at": row.entered_at.isoformat() if row.entered_at else None} for row in marks],
@@ -2565,7 +2594,12 @@ def return_book(loan_id: str, ctx=Depends(auth), s=Depends(db)):
 @router.get("/hr/leave")
 def list_leave(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hr", "view")[0])
-    rows = s.query(D.LeaveRequest).order_by(desc(D.LeaveRequest.id)).all()
+    rows = (s.query(D.LeaveRequest)
+            .filter(D.LeaveRequest.tenant_id == ctx.get("tenant_id", TENANT))
+            .order_by(desc(D.LeaveRequest.id)).all())
+    staff = {row.id: row for row in s.query(D.StaffMember).filter(D.StaffMember.tenant_id == ctx.get("tenant_id", TENANT)).all()}
+    if ctx.get("scope_level") == "campus":
+        rows = [row for row in rows if staff.get(row.staff_id) and staff[row.staff_id].campus == ctx.get("scope_ref")]
     return {"leave": [{"id": l.id, "staff": l.staff_name, "kind": l.kind,
                        "from": l.from_date.isoformat(), "to": l.to_date.isoformat(),
                        "days": l.days, "reason": l.reason, "status": l.status}
@@ -2624,12 +2658,21 @@ class LeaveDecisionIn(BaseModel):
 
 @router.post("/hr/leave/decide")
 def decide_leave(body: LeaveDecisionIn, ctx=Depends(auth), s=Depends(db)):
+    if body.action not in ("approve", "reject"):
+        raise HTTPException(400, "Invalid leave decision")
     act = "approve_leave" if body.action == "approve" else "reject_leave"
     dec, verb = gate(s, ctx, "hr", act)
     require(dec)
     l = s.query(D.LeaveRequest).get(body.leave_id)
     if not l:
         raise HTTPException(404, "Leave request not found")
+    if l.tenant_id != ctx.get("tenant_id", TENANT):
+        raise HTTPException(403, "Leave request is outside your authorized tenant")
+    staff = s.query(D.StaffMember).get(l.staff_id)
+    if ctx.get("scope_level") == "campus" and (not staff or staff.campus != ctx.get("scope_ref")):
+        raise HTTPException(403, "Leave request is outside your authorized campus")
+    if l.status != "pending":
+        raise HTTPException(409, "This leave request has already been decided")
     l.status = "approved" if body.action == "approve" else "rejected"
     l.decided_by = actor_name(s, ctx)
     s.commit()
@@ -2642,23 +2685,123 @@ def decide_leave(body: LeaveDecisionIn, ctx=Depends(auth), s=Depends(db)):
 #  PROCUREMENT / ASSETS
 # --------------------------------------------------------------------------- #
 @router.get("/assets")
-def list_assets(ctx=Depends(auth), s=Depends(db)):
+def list_assets(q: str = "", category: str = "", status: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "assets", "view")[0])
-    rows = s.query(D.Asset).all()
-    return {"assets": [{"id": a.id, "tag": a.tag, "name": a.name, "category": a.category,
+    query = s.query(D.Asset).filter(D.Asset.tenant_id == ctx.get("tenant_id", TENANT))
+    if q:
+        like = f"%{q}%"
+        query = query.filter((D.Asset.tag.ilike(like)) | (D.Asset.name.ilike(like)) | (D.Asset.location.ilike(like)))
+    if category:
+        query = query.filter(D.Asset.category == category)
+    if status:
+        query = query.filter(D.Asset.status == status)
+    rows = query.order_by(D.Asset.tag).all()
+    all_rows = s.query(D.Asset).filter(D.Asset.tenant_id == ctx.get("tenant_id", TENANT)).all()
+    assets = [{"id": a.id, "tag": a.tag, "name": a.name, "category": a.category,
                         "location": a.location, "status": a.status, "value": a.value}
-                       for a in rows],
+                       for a in rows]
+    return {"assets": assets,
+            "categories": sorted({a.category for a in all_rows if a.category}),
+            "statuses": sorted({a.status for a in all_rows if a.status}),
+            "category_summary": [{"category": category_name, "count": sum(a.category == category_name for a in all_rows),
+                                  "book_value": sum(a.value or 0 for a in all_rows if a.category == category_name)}
+                                 for category_name in sorted({a.category for a in all_rows if a.category})],
+            "summary": {"total": len(all_rows), "book_value": sum(a.value or 0 for a in all_rows), "in_service": sum(a.status == "in-service" for a in all_rows), "maintenance": sum(a.status == "maintenance" for a in all_rows)},
             "can_add": can(s, ctx, "assets", "add")}
+
+
+@router.get("/procurement")
+def procurement(ctx=Depends(auth), s=Depends(db)):
+    """Completed procurement records from the existing asset register.
+
+    The schema has no requisition or PO table, so those arrays remain honestly
+    empty instead of fabricating operational records.
+    """
+    require(gate(s, ctx, "procurement", "view")[0])
+    rows = (s.query(D.Asset).filter(D.Asset.tenant_id == ctx.get("tenant_id", TENANT))
+            .order_by(D.Asset.id.desc()).all())
+    requests = (s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT), WorkflowInstance.process_key == "purchase_request")
+                .order_by(WorkflowInstance.updated_at.desc()).all())
+    return {"assets": [{"id": a.id, "tag": a.tag, "item": a.name, "category": a.category,
+                         "location": a.location, "value": a.value, "status": a.status}
+                        for a in rows],
+            "requisitions": [{"id": item.id, "title": item.title, "amount": item.amount,
+                                "state": item.state, "escalated": item.escalated,
+                                "initiator": item.initiator_name, "updated_at": item.updated_at.isoformat()}
+                               for item in requests],
+            "purchase_orders": []}
+
+
+@router.get("/approval-history")
+def approval_history(q: str = "", action: str = "", ctx=Depends(auth), s=Depends(db)):
+    """Actual approval decisions relevant to the signed-in Principal."""
+    require(gate(s, ctx, "approvals", "view")[0])
+    query = (s.query(Approval, WorkflowInstance)
+             .join(WorkflowInstance, Approval.workflow_id == WorkflowInstance.id)
+             .filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT)))
+    if action:
+        query = query.filter(Approval.decision == action.upper())
+    if q:
+        like = f"%{q}%"
+        query = query.filter(or_(WorkflowInstance.title.ilike(like), WorkflowInstance.label.ilike(like), Approval.actor_name.ilike(like)))
+    rows = query.order_by(Approval.created_at.desc()).limit(200).all()
+    return {"events": [{"id": approval.id, "workflow_id": workflow.id, "request": workflow.title,
+                         "module": workflow.label, "requested_by": workflow.initiator_name,
+                         "action": approval.decision, "approver": approval.actor_name,
+                         "reason": approval.reason, "at": approval.created_at.isoformat(),
+                         "state": workflow.state}
+                        for approval, workflow in rows]}
+
+
+@router.get("/escalations")
+def escalations(q: str = "", state: str = "", ctx=Depends(auth), s=Depends(db)):
+    """Workflow-state escalation views; no redundant escalation table."""
+    require(gate(s, ctx, "approvals", "view")[0])
+    query = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT), WorkflowInstance.escalated.is_(True))
+    if state:
+        query = query.filter(WorkflowInstance.state == state)
+    if q:
+        like = f"%{q}%"
+        query = query.filter(or_(WorkflowInstance.title.ilike(like), WorkflowInstance.label.ilike(like), WorkflowInstance.initiator_name.ilike(like)))
+    workflows = query.order_by(WorkflowInstance.updated_at.desc()).all()
+    destinations = {item["key"]: item.get("escalation", "") for item in APPROVAL_MATRIX}
+    outgoing_ids = {row[0] for row in s.query(Approval.workflow_id).filter(Approval.actor_id == ctx["sub"], Approval.decision == "ESCALATE").all()}
+    def row(workflow):
+        return {"id": workflow.id, "reference": workflow.id, "module": workflow.label,
+                "title": workflow.title, "from": workflow.initiator_name,
+                "to": destinations.get(workflow.process_key, ""), "status": workflow.state,
+                "created_at": workflow.created_at.isoformat(), "updated_at": workflow.updated_at.isoformat()}
+    return {"incoming": [row(item) for item in workflows if "principal" in destinations.get(item.process_key, "").lower()],
+            "outgoing": [row(item) for item in workflows if item.id in outgoing_ids]}
 
 
 # --------------------------------------------------------------------------- #
 #  HOSTEL / TRANSPORT
 # --------------------------------------------------------------------------- #
+def _hostel_scoped(query, model, ctx):
+    """Apply server-side tenant/campus scope; the browser never supplies either."""
+    query = query.filter(model.tenant_id == ctx.get("tenant_id", TENANT))
+    if ctx.get("scope_level") == "campus":
+        query = query.filter(model.campus == ctx.get("scope_ref"))
+    return query
+
+
+def _hostel_request_or_404(s, alloc_id: str, ctx, lock: bool = False):
+    query = _hostel_scoped(s.query(D.HostelAllocation), D.HostelAllocation, ctx).filter(D.HostelAllocation.id == alloc_id)
+    if lock:
+        query = query.with_for_update()
+    allocation = query.first()
+    if not allocation:
+        raise HTTPException(404, "Allocation request was not found in your authorized tenant or campus")
+    return allocation
+
+
 @router.get("/hostel")
 def hostel(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hostel", "view")[0])
-    rooms = s.query(D.HostelRoom).all()
-    allocs = s.query(D.HostelAllocation).filter(D.HostelAllocation.status == "requested").all()
+    rooms = _hostel_scoped(s.query(D.HostelRoom), D.HostelRoom, ctx).all()
+    allocs = (_hostel_scoped(s.query(D.HostelAllocation), D.HostelAllocation, ctx)
+              .filter(D.HostelAllocation.status == "requested").all())
     cap = sum(r.capacity for r in rooms)
     occ = sum(r.occupied for r in rooms)
     return {"summary": {"rooms": len(rooms), "capacity": cap, "occupied": occ,
@@ -2668,18 +2811,53 @@ def hostel(ctx=Depends(auth), s=Depends(db)):
             "can_allocate": can(s, ctx, "hostel", "allocate")}
 
 
+@router.get("/hostel/available-rooms/{alloc_id}")
+def available_hostel_rooms(alloc_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "hostel", "allocate")[0])
+    allocation = _hostel_request_or_404(s, alloc_id, ctx)
+    if allocation.status != "requested":
+        raise HTTPException(409, "This allocation request has already been decided")
+    rooms = (_hostel_scoped(s.query(D.HostelRoom), D.HostelRoom, ctx)
+             .filter(D.HostelRoom.occupied < D.HostelRoom.capacity)
+             .order_by(D.HostelRoom.block, D.HostelRoom.room_no).all())
+    return {"request": {"id": allocation.id, "student": allocation.student_name},
+            "rooms": [{"id": room.id, "block": room.block, "room_no": room.room_no,
+                       "capacity": room.capacity, "occupied": room.occupied,
+                       "vacant": room.capacity - room.occupied} for room in rooms]}
+
+
+class HostelAllocationIn(BaseModel):
+    room_id: str
+
+
 @router.post("/hostel/allocate/{alloc_id}")
-def allocate_hostel(alloc_id: str, ctx=Depends(auth), s=Depends(db)):
+def allocate_hostel(alloc_id: str, body: HostelAllocationIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "hostel", "allocate")
     require(dec)
-    a = s.query(D.HostelAllocation).get(alloc_id)
-    if not a:
-        raise HTTPException(404, "Request not found")
+    a = _hostel_request_or_404(s, alloc_id, ctx, lock=True)
+    if a.status != "requested":
+        raise HTTPException(409, "This allocation request has already been decided")
+    if a.student_id and (s.query(D.HostelAllocation)
+                         .filter(D.HostelAllocation.tenant_id == ctx.get("tenant_id", TENANT),
+                                 D.HostelAllocation.student_id == a.student_id,
+                                 D.HostelAllocation.status == "allocated",
+                                 D.HostelAllocation.id != a.id).first()):
+        raise HTTPException(409, "This student already has an active hostel allocation")
+    room = (_hostel_scoped(s.query(D.HostelRoom), D.HostelRoom, ctx)
+            .filter(D.HostelRoom.id == body.room_id).with_for_update().first())
+    if not room:
+        raise HTTPException(404, "Room was not found in your authorized tenant or campus")
+    if room.occupied >= room.capacity:
+        raise HTTPException(409, "This room is no longer available")
+    a.room_id = room.id
     a.status = "allocated"
+    room.occupied += 1
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "hostel.allocate",
-                f"alloc:{alloc_id}", "requested", "allocated", f"Allocated room to {a.student_name}")
-    return {"status": "allocated", "decision": dec.as_dict()}
+                f"alloc:{alloc_id}", "requested", "allocated",
+                f"Allocated {room.block} {room.room_no} to {a.student_name}")
+    return {"status": "allocated", "room": {"id": room.id, "block": room.block, "room_no": room.room_no},
+            "decision": dec.as_dict()}
 
 
 @router.get("/transport")
@@ -3002,6 +3180,64 @@ def governance(semester: str = Query("", description="Semester key"), ctx=Depend
     payload["can_edit"] = can_edit_dashboard
     payload["range"] = _governance_period_range(s)
     return payload
+
+
+def _principal_compliance_requirement(s, ctx, requirement_id: str):
+    if ctx.get("office_n") != 4:
+        raise HTTPException(403, "Compliance requirements are available to the Principal only")
+    requirement = (s.query(D.ComplianceRequirement)
+                   .filter(D.ComplianceRequirement.id == requirement_id,
+                           D.ComplianceRequirement.tenant_id == ctx.get("tenant_id", TENANT)).first())
+    if not requirement or (ctx.get("scope_level") == "campus" and requirement.campus != ctx.get("scope_ref")):
+        raise HTTPException(404, "Compliance requirement was not found in your authorized campus")
+    return requirement
+
+
+def _compliance_requirement_payload(s, requirement, include_history=False):
+    workflow = (s.query(WorkflowInstance)
+                .filter(WorkflowInstance.id == requirement.workflow_id,
+                        WorkflowInstance.tenant_id == requirement.tenant_id).first())
+    payload = {"id": requirement.id, "reference_code": requirement.reference_code,
+               "title": requirement.title, "description": requirement.description,
+               "category": requirement.category, "responsible_department": requirement.responsible_department,
+               "campus": requirement.campus, "priority": requirement.priority,
+               "due_date": requirement.due_date.isoformat() if requirement.due_date else None,
+               "evidence_reference": requirement.evidence_reference,
+               "workflow_id": requirement.workflow_id, "status": workflow.state if workflow else "unavailable",
+               "escalated": bool(workflow and workflow.escalated),
+               "updated_at": requirement.updated_at.isoformat() if requirement.updated_at else None}
+    if include_history:
+        history = (s.query(Approval).filter(Approval.workflow_id == requirement.workflow_id)
+                   .order_by(Approval.created_at.desc()).all())
+        payload["history"] = [{"id": item.id, "actor": item.actor_name, "stage": item.stage_label,
+                               "decision": item.decision, "reason": item.reason,
+                               "at": item.created_at.isoformat()} for item in history]
+    return payload
+
+
+@router.get("/compliance-requirements")
+def compliance_requirements(q: str = "", category: str = "", status: str = "", priority: str = "", ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "governance", "view")[0])
+    if ctx.get("office_n") != 4:
+        raise HTTPException(403, "Compliance requirements are available to the Principal only")
+    query = s.query(D.ComplianceRequirement).filter(D.ComplianceRequirement.tenant_id == ctx.get("tenant_id", TENANT))
+    if ctx.get("scope_level") == "campus": query = query.filter(D.ComplianceRequirement.campus == ctx.get("scope_ref"))
+    if q:
+        like = f"%{q}%"; query = query.filter(or_(D.ComplianceRequirement.title.ilike(like), D.ComplianceRequirement.reference_code.ilike(like)))
+    if category: query = query.filter(D.ComplianceRequirement.category == category)
+    if priority: query = query.filter(D.ComplianceRequirement.priority == priority)
+    rows = query.order_by(D.ComplianceRequirement.due_date).all()
+    payloads = [_compliance_requirement_payload(s, row) for row in rows]
+    if status: payloads = [row for row in payloads if row["status"] == status]
+    return {"requirements": payloads,
+            "filters": {"categories": sorted({row.category for row in rows}), "priorities": sorted({row.priority for row in rows}),
+                        "statuses": sorted({row["status"] for row in payloads})}}
+
+
+@router.get("/compliance-requirements/{requirement_id}")
+def compliance_requirement(requirement_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "governance", "view")[0])
+    return {"requirement": _compliance_requirement_payload(s, _principal_compliance_requirement(s, ctx, requirement_id), True)}
 
 
 class GovernanceKpisIn(BaseModel):

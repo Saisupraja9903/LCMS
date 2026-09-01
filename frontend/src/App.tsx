@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, getUser, logout, saveSession } from './api'
 import Workflows from './views/Workflows'
+import { ApprovalHistory, Escalations } from './views/PrincipalWorkflowViews'
 import Delegations from './views/Delegations'
 import Directory from './views/Directory'
 import Matrices from './views/Matrices'
@@ -23,6 +24,9 @@ import Library from './modules/Library'
 import HR from './modules/HR'
 import FacultyStaff from './modules/FacultyStaff'
 import Assets from './modules/Assets'
+import Facilities from './modules/Facilities'
+import PrincipalCompliance from './modules/PrincipalCompliance'
+import PrincipalAtRisk from './modules/PrincipalAtRisk'
 import Hostel from './modules/Hostel'
 import Transport from './modules/Transport'
 import Research from './modules/Research'
@@ -75,19 +79,13 @@ const CHAIRMAN_DISPLAY: Record<string, { label: string; group: string }> = {
 // Entries without a matching capability remain visible but disabled, so the UI does
 // not imply that an unavailable backend workflow can be opened.
 const PRINCIPAL_NAV = [
-  ['Workspace', 'Dashboard', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'],
-  ['Academics', 'Academic Calendar', 'academic_calendar'], ['Academics', 'Curriculum', 'curriculum'],
-  ['Academics', 'Courses & Subjects', 'courses_subjects'], ['Academics', 'Timetable', 'calendar'],
-  ['Academics', 'Academic Performance', 'analytics'],
-  ['Students', 'Students', 'students'], ['Students', 'Admissions', 'admissions'], ['Students', 'Attendance', 'attendance'],
-  ['Students', 'Performance', 'analytics'], ['Students', 'Student Welfare', 'grievance'], ['Students', 'Discipline & Grievances', 'grievance'],
-  ['Examination', 'Exams', 'examinations'],
-  ['People & Workforce', 'Faculty & Staff', 'faculty_staff'], ['People & Workforce', 'Leave', 'leave'], ['People & Workforce', 'Recruitment / Vacancies', 'recruitment'],
-  ['Finance & Operations', 'Finance', 'finance'], ['Finance & Operations', 'Procurement', 'procurement'], ['Finance & Operations', 'Facilities & Maintenance', 'assets'],
+  ['Academic / People', 'Principal', 'overview'], ['Academic / People', 'At-Risk Students', 'at_risk_students'], ['Academic / People', 'Faculty & Staff', 'faculty_staff'], ['Academic / People', 'Leave', 'leave'], ['Academic / People', 'Recruitment / Vacancies', 'recruitment'],
+  ['Finance & Operations', 'Finance', 'finance'], ['Finance & Operations', 'Procurement', 'procurement'], ['Finance & Operations', 'Facilities & Maintenance', 'facilities'],
   ['Finance & Operations', 'Assets', 'assets'], ['Finance & Operations', 'Hostel', 'hostel'], ['Finance & Operations', 'Transport', 'transport'],
-  ['Approvals & Workflow', 'My Approvals', 'approvals'], ['Approvals & Workflow', 'Escalations', 'workflows'], ['Approvals & Workflow', 'Workflows', 'workflows'], ['Approvals & Workflow', 'Delegation', 'delegation'],
+  ['Approvals & Workflow', 'My Approvals', 'approvals'], ['Approvals & Workflow', 'Approval History', 'approval_history'], ['Approvals & Workflow', 'Workflows', 'workflows'], ['Approvals & Workflow', 'Escalations', 'escalations'], ['Approvals & Workflow', 'Delegation', 'delegation'],
+  ['Governance & Risk', 'Accreditation & Compliance', 'compliance'],
   ['Audit & Reporting', 'Audit', 'audit'], ['Audit & Reporting', 'Reports', 'analytics'],
-  ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'matrices'],
+  ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'permissions'],
 ] as const
 
 // Faculty offices share the same functional modules, but need the focused
@@ -140,7 +138,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // Faculty & Staff is a Principal-specific presentation of the authorised
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
-    const principalVirtualModule = user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)
+    const principalVirtualModule = user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects', 'facilities', 'at_risk_students', 'compliance', 'approval_history', 'escalations', 'leave', 'recruitment', 'permissions'].includes(view)
     if (!principalVirtualModule && !ws.modules.some((module: any) => module.key === view)) {
       setView(ws.modules[0].key)
     }
@@ -199,11 +197,20 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   })
   const order = chairmanShell ? CHAIRMAN_GROUP_ORDER : GROUP_ORDER
   const groupKeys = [...order.filter(key => groups[key]), ...Object.keys(groups).filter(key => !order.includes(key))]
-  const current = displayModules.find((module: any) => module.key === view) || displayModules[0]
+  const current = displayModules.find((module: any) => module.key === view)
+    || (principalShell && (view === 'leave' || view === 'recruitment') ? displayModules.find((module: any) => module.key === 'hr') : undefined)
+    || displayModules[0]
   const principalGroups = PRINCIPAL_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
       || (key === 'courses_subjects' ? displayModules.find((module: any) => module.key === 'academics') : undefined)
       || (key === 'faculty_staff' ? { key, label, group, enabled: true } : undefined)
+      || (key === 'leave' || key === 'recruitment' ? displayModules.find((module: any) => module.key === 'hr') : undefined)
+      || (key === 'facilities' ? displayModules.find((module: any) => module.key === 'assets') : undefined)
+      || (key === 'at_risk_students' ? displayModules.find((module: any) => module.key === 'students') : undefined)
+      || (key === 'compliance' ? displayModules.find((module: any) => module.key === 'governance') : undefined)
+      || (key === 'approval_history' ? displayModules.find((module: any) => module.key === 'approvals') : undefined)
+      || (key === 'escalations' ? displayModules.find((module: any) => module.key === 'workflows') : undefined)
+      || (key === 'permissions' ? { key, label, group, enabled: true } : undefined)
     ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: Boolean(source) })
     return out
   }, {})
@@ -251,7 +258,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
                   type="button"
                 >
                   <span className="ico">
-                    <NavGlyph moduleKey={module.key} />
+                    <NavGlyph moduleKey={module.key} principal={principalShell} />
                   </span>
                   <span className="nav-label">{module.label}</span>
                   {module.key === 'workflows' && notifs.unread > 0 && (
@@ -370,7 +377,10 @@ export default function App({ onLogout }: { onLogout: () => void }) {
             if (showRoles) setShowRoles(false)
           }}
         >
-          <ModuleView view={view} module={current} user={user} onChange={loadNotifs} go={setView} />
+          <ModuleView view={view} module={current} user={user} onChange={loadNotifs} go={(next: string) => {
+            const riskShortcut = user.office_n === 4 && next === 'students' && sessionStorage.getItem('principal-student-risk') === 'at-risk'
+            setView(riskShortcut ? 'at_risk_students' : next)
+          }} />
         </div>
       </div>
     </div>
@@ -400,6 +410,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'students':
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
       return <Students caps={caps} />
+    case 'at_risk_students':
+      return <PrincipalAtRisk />
     case 'academics':
       if (user.persona === 'student') return <StudentCoursesView />
       return <Academics caps={caps} />
@@ -429,13 +441,15 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'faculty_staff':
       return <FacultyStaff />
     case 'leave':
-      return <HR caps={caps} />
+      return <HR caps={caps} principalView="leave" />
     case 'recruitment':
-      return <HR caps={caps} />
+      return <HR caps={caps} principalView="recruitment" />
     case 'procurement':
       return <Procurement caps={caps} />
     case 'assets':
       return <Assets caps={caps} />
+    case 'facilities':
+      return <Facilities />
     case 'hostel':
       return <Hostel caps={caps} />
     case 'transport':
@@ -448,6 +462,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Grievance caps={caps} />
     case 'governance':
       return <Governance user={user} />
+    case 'compliance':
+      return <PrincipalCompliance go={go} />
     case 'admin':
       return <AdminPanel caps={caps} />
     case 'approvals':
@@ -456,12 +472,16 @@ function ModuleView({ view, module, user, onChange, go }: any) {
         : <Workflows user={user} onChange={onChange} />
     case 'workflows':
       return <Workflows user={user} onChange={onChange} />
+    case 'approval_history':
+      return <ApprovalHistory />
+    case 'escalations':
+      return <Escalations />
     case 'delegation':
       return user.office_n === 1 ? <ChairmanDelegation user={user} /> : <Delegations user={user} />
     case 'audit':
       return <AuditView />
     case 'directory':
-      return <Directory />
+      return <Directory user={user} />
     case 'matrices':
       return <Matrices />
     case 'permissions':
@@ -518,18 +538,30 @@ function ChevronDownIcon() {
   )
 }
 
-function NavGlyph({ moduleKey }: { moduleKey: string }) {
+function NavGlyph({ moduleKey, principal = false }: { moduleKey: string; principal?: boolean }) {
   switch (moduleKey) {
     case 'overview':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 11.5 12 5l8 6.5V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1v-8.5Z" /></svg>
+    case 'at_risk_students':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 4 3.8 19h16.4L12 4Z" /><path d="M12 10v4M12 17h.01" /></svg>
+    case 'faculty_staff':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="9" cy="8" r="3" /><circle cx="17" cy="9" r="2.3" /><path d="M3.5 20a5.5 5.5 0 0 1 11 0M14 20a4 4 0 0 1 6.5-3.1" /></svg>
+    case 'leave':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M8 3v4M16 3v4M3 10h18M8 15l2 2 5-5" /></svg>
+    case 'recruitment':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="7" width="16" height="12" rx="2" /><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M4 12h16M12 12v3" /></svg>
     case 'calendar':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M8 3v4M16 3v4M3 10h18" /><path d="M8 14h3M13 14h3M8 18h3" /></svg>
     case 'academic_calendar':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="4" width="18" height="17" rx="2" /><path d="M7 2v4M17 2v4M3 9h18" /><path d="M7 13h10M7 17h6" /></svg>
     case 'governance':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 4 5 7v5c0 4.2 2.9 7.9 7 8.9 4.1-1 7-4.7 7-8.9V7l-7-3Z" /><path d="M9.5 12 11 13.5l3.5-4" /></svg>
+    case 'compliance':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 3 5 6v5c0 4.7 2.9 8.5 7 10 4.1-1.5 7-5.3 7-10V6l-7-3Z" /><path d="m9 12 2 2 4-4" /></svg>
     case 'approvals':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M7 4h7l5 5v11a1 1 0 0 1-1 1H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" /><path d="M14 4v5h5M9 14l2 2 4-4" /></svg>
+    case 'approval_history':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5" /><path d="M4 4v4.5h4.5M12 8v4l3 2" /></svg>
     case 'delegation':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="8" cy="8" r="3" /><circle cx="16" cy="16" r="3" /><path d="M10.5 10.5 13.5 13.5M5 18a4 4 0 0 1 6 0M13 6a4 4 0 0 1 6 0" /></svg>
     case 'audit':
@@ -546,6 +578,8 @@ function NavGlyph({ moduleKey }: { moduleKey: string }) {
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m9 12 3-3 3 3" /><path d="m9 16 3-3 3 3" /><path d="M5 7h4M15 17h4M4 12h4M16 12h4" /></svg>
     case 'workflows':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h11M4 12h16M4 17h9" /><circle cx="18" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></svg>
+    case 'escalations':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 4 3.8 19h16.4L12 4Z" /><path d="M12 10v4M12 17h.01" /></svg>
     case 'matrices':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 4h16v16H4z" /><path d="M4 10h16M10 4v16" /></svg>
     case 'students':
@@ -576,11 +610,17 @@ function NavGlyph({ moduleKey }: { moduleKey: string }) {
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /><path d="m6 8 3-3 3 3 4-4 2 2" /></svg>
     case 'procurement':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m4 7 8-4 8 4-8 4-8-4Z" /><path d="M4 7v10l8 4 8-4V7" /></svg>
+    case 'facilities':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m14 6 4-4 2 2-4 4" /><path d="m13 7-8.5 8.5a2.1 2.1 0 1 0 3 3L16 10" /><path d="m5 5 3 3M4 10l2-2" /></svg>
     case 'assets':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 9h8M8 13h5" /></svg>
+    case 'permissions':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M7 11a5 5 0 1 1 9.2 2.8L21 18.6 18.6 21l-1.7-1.7-1.5 1.5-2.2-2.2 1.5-1.5A5 5 0 0 1 7 11Z" /><circle cx="12" cy="11" r="1" /></svg>
     case 'admin':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a2 2 0 1 1-4 0v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a2 2 0 1 1 0-4h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a2 2 0 1 1 4 0v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H20a2 2 0 1 1 0 4h-.2a1 1 0 0 0-.9.6Z" /></svg>
     default:
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="8" /></svg>
+      return principal
+        ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></svg>
+        : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="8" /></svg>
   }
 }

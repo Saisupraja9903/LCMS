@@ -39,6 +39,7 @@ from portal_api import router as portal_router
 from integrations_api import router as integrations_router
 from sms_api import router as sms_router
 from domain_seed import seed_domain
+import domain_models as D
 
 # Use the same named security scheme as modular routers. Swagger UI now has a
 # single Authorize action which applies the bearer token to protected APIs.
@@ -926,18 +927,52 @@ class DecideWF(BaseModel):
     reason: str = ""
 
 
+def _principal_workflow_actions(wf, proc, ctx):
+    """Return the actions a Principal may be offered at this exact workflow stage.
+
+    The final decision remains with authorize() in decide_workflow; this only
+    prevents the UI from advertising decisions for another office's stage.
+    """
+    if ctx.get("office_n") != 4 or wf.state in ("approved", "executed", "rejected"):
+        return [], "This workflow has reached a terminal state."
+    stage_label = proc["chain"][wf.current_stage] if proc and 0 <= wf.current_stage < len(proc["chain"]) else ""
+    if "principal" not in stage_label.lower():
+        return [], f"Decision unavailable at the current workflow stage. It is awaiting {stage_label or 'the configured approver'}."
+    if wf.process_key == "compliance_requirement":
+        return ["review", "return", "escalate"], "Principal action is available at the current workflow stage."
+    return ["review", "approve", "reject", "escalate"], "Principal decision is available at the current workflow stage."
+
+
 @app.post("/api/workflows/decide")
 def decide_workflow(body: DecideWF, ctx=Depends(auth), s=Depends(db)):
     wf = s.query(WorkflowInstance).get(body.workflow_id)
     if not wf:
         raise HTTPException(404, "Workflow not found")
+    if wf.tenant_id != ctx.get("tenant_id", TENANT):
+        raise HTTPException(403, "Workflow is outside your authorized tenant")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
+    if ctx["office_n"] == 4:
+        allowed_actions, unavailable_reason = _principal_workflow_actions(wf, proc, ctx)
+        if body.action not in allowed_actions:
+            raise HTTPException(403, unavailable_reason)
+    compliance = s.query(D.ComplianceRequirement).filter(D.ComplianceRequirement.workflow_id == wf.id).first()
+    if compliance:
+        if ctx["office_n"] != 4:
+            raise HTTPException(403, "Only the Principal may act on a compliance requirement")
+        if compliance.tenant_id != ctx.get("tenant_id") or (ctx.get("scope_level") == "campus" and compliance.campus != ctx.get("scope_ref")):
+            raise HTTPException(403, "Compliance requirement is outside your authorized campus")
+        if wf.current_stage != 2:
+            raise HTTPException(403, "Compliance requirement is not at the Principal workflow stage")
+        if body.action not in ("review", "return", "escalate"):
+            raise HTTPException(400, "Unsupported compliance workflow action")
+        if body.action == "return" and not body.reason.strip():
+            raise HTTPException(400, "Please provide a reason before returning this requirement.")
     u = s.query(User).get(ctx["sub"])
     p = s.query(Person).get(u.person_id)
     o = office(ctx["office_n"])
 
     # Resolve RBAC authority for this action.
-    verb = "approve" if body.action in ("approve", "execute") else body.action
+    verb = "approve" if body.action in ("approve", "execute", "return") else body.action
     if body.action == "reject":
         verb = "reject"
     rbac = rbac_for(ctx["office_n"], o["level"], verb if verb in VERBS else "approve")
@@ -948,7 +983,7 @@ def decide_workflow(body: DecideWF, ctx=Depends(auth), s=Depends(db)):
 
     # Run the authority gate (Document §7 steps 8-13).
     dec = authorize(
-        ctx=ctx, action=body.action if body.action in VERBS else "approve",
+        ctx=ctx, action=("reject" if body.action == "return" else body.action) if body.action in VERBS else "approve",
         resource=f"workflow:{wf.process_key}",
         rbac_authority=rbac,
         workflow_state=wf.state,
@@ -972,6 +1007,12 @@ def decide_workflow(body: DecideWF, ctx=Depends(auth), s=Depends(db)):
     if dec.outcome == ALLOW:
         if body.action == "reject":
             wf.state = "rejected"
+        elif body.action == "return":
+            wf.state = "submitted"
+            wf.current_stage = 1
+        elif compliance and body.action == "escalate":
+            wf.state = "escalated"
+            wf.escalated = True
         elif body.action == "execute":
             wf.state = "executed"
         elif body.action == "review":
@@ -983,7 +1024,7 @@ def decide_workflow(body: DecideWF, ctx=Depends(auth), s=Depends(db)):
                 wf.state = "approved"
             else:
                 wf.state = "under_review"
-    elif dec.outcome == ESCALATE:
+    elif dec.outcome == ESCALATE or (compliance and body.action == "escalate" and dec.outcome == RECOMMEND_OUT):
         wf.state = "escalated"
         wf.escalated = True
     elif dec.outcome == RECOMMEND_OUT:
@@ -1120,7 +1161,7 @@ def _visible_page_numbers(page: int, total_pages: int):
 
 @app.get("/api/workflows")
 def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
-    q = s.query(WorkflowInstance)
+    q = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT))
     pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     if scope == "mine":
         q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
@@ -1133,7 +1174,7 @@ def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
             rows = own_rows[:100]
         else:
             candidate_rows = (s.query(WorkflowInstance)
-                              .filter(WorkflowInstance.state.in_(pending_states))
+                              .filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT), WorkflowInstance.state.in_(pending_states))
                               .order_by(desc(WorkflowInstance.updated_at)).limit(220).all())
             seen = {row.id for row in own_rows}
             rows = list(own_rows)
@@ -1149,7 +1190,10 @@ def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
     out = []
     for wf in rows:
         proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
-        out.append(_wf_payload(s, wf, proc))
+        payload = _wf_payload(s, wf, proc)
+        if ctx["office_n"] == 4:
+            payload["available_actions"], payload["action_message"] = _principal_workflow_actions(wf, proc, ctx)
+        out.append(payload)
     return {"workflows": out}
 
 
@@ -1158,8 +1202,13 @@ def get_workflow(wid: str, ctx=Depends(auth), s=Depends(db)):
     wf = s.query(WorkflowInstance).get(wid)
     if not wf:
         raise HTTPException(404, "Not found")
+    if wf.tenant_id != ctx.get("tenant_id", TENANT):
+        raise HTTPException(403, "Workflow is outside your authorized tenant")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
-    return _wf_payload(s, wf, proc)
+    payload = _wf_payload(s, wf, proc)
+    if ctx["office_n"] == 4:
+        payload["available_actions"], payload["action_message"] = _principal_workflow_actions(wf, proc, ctx)
+    return payload
 
 
 class ChairmanStartWF(BaseModel):
@@ -1798,7 +1847,8 @@ def my_permissions(ctx=Depends(auth), s=Depends(db)):
     scope_limits = APPROVAL_LIMITS.get(ctx["scope_level"], {})
     lim = max(scope_limits.values()) if scope_limits else None
     return {"office": o["name"], "level": o["level"],
-            "scope_level": ctx["scope_level"],
+            "scope_level": ctx["scope_level"], "tenant_id": ctx.get("tenant_id"),
+            "scope_ref": ctx.get("scope_ref"),
             "approval_limit": lim,
             "all_verbs": list(VERBS),
             "permissions": granted}

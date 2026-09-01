@@ -67,6 +67,9 @@ def rbac_for(office_n: int, level: int, verb: str) -> str:
 # Each: key, label, chain[initiator, reviewer, approver, final], escalation,
 #       owning office_n, valid workflow states for progression, has_amount
 APPROVAL_MATRIX = [
+    {"key": "compliance_requirement", "label": "Compliance requirement", "office_n": 4,
+     "chain": ["Responsible Department", "IQAC", "Principal", "Vice Chairman"],
+     "escalation": "Vice Chairman", "amount": False},
     {"key": "student_admission", "label": "Student admission", "office_n": 15,
      "chain": ["Applicant", "Admissions Office", "Admissions Dir.", "Principal/Registrar"],
      "escalation": "VC", "amount": False},
@@ -147,6 +150,7 @@ WF_VALID = {
     "reject": ["submitted", "under_review", "reviewed", "escalated"],
     "execute": ["approved"],
     "escalate": ["submitted", "under_review", "reviewed"],
+    "return": ["submitted", "under_review", "reviewed"],
 }
 
 # Approval limits by process & scope level (Document §10 — configurable, never hardcoded).

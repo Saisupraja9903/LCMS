@@ -52,6 +52,8 @@ export const api = {
     req('/workflows/decide', { method: 'POST', body: JSON.stringify({ workflow_id, action, reason }) }),
   workflows: (scope = 'all') => req(`/workflows?scope=${scope}`),
   workflow: (id: string) => req(`/workflows/${id}`),
+  approvalHistory: (filters: Record<string, string> = {}) => req(`/approval-history?${new URLSearchParams(filters).toString()}`),
+  escalations: (filters: Record<string, string> = {}) => req(`/escalations?${new URLSearchParams(filters).toString()}`),
   chairmanApprovals: (params: Record<string, any> = {}) => {
     const qs = new URLSearchParams()
     Object.entries(params).forEach(([key, value]) => {
@@ -209,9 +211,16 @@ export const api = {
     req('/hr/leave/decide', { method: 'POST', body: JSON.stringify({ leave_id, action }) }),
 
   // ---- ops ----
-  assets: () => req('/assets'),
+  assets: (filters: Record<string, string> = {}) => {
+    const params = new URLSearchParams()
+    Object.entries(filters).forEach(([key, value]) => { if (value) params.set(key, value) })
+    const qs = params.toString()
+    return req(`/assets${qs ? `?${qs}` : ''}`)
+  },
+  procurement: () => req('/procurement'),
   hostel: () => req('/hostel'),
-  allocateHostel: (id: string) => req(`/hostel/allocate/${id}`, { method: 'POST' }),
+  availableHostelRooms: (id: string) => req(`/hostel/available-rooms/${id}`),
+  allocateHostel: (id: string, room_id: string) => req(`/hostel/allocate/${id}`, { method: 'POST', body: JSON.stringify({ room_id }) }),
   transport: () => req('/transport'),
   research: () => req('/research'),
   placements: () => req('/placements'),
@@ -229,6 +238,8 @@ export const api = {
     const qs = params.toString()
     return req(`/governance${qs ? `?${qs}` : ''}`)
   },
+  complianceRequirements: (filters: Record<string, string> = {}) => req(`/compliance-requirements?${new URLSearchParams(filters).toString()}`),
+  complianceRequirement: (id: string) => req(`/compliance-requirements/${encodeURIComponent(id)}`),
   updateGovernance: (semester: string, body: any) =>
     req(`/governance/${encodeURIComponent(semester)}`, { method: 'PUT', body: JSON.stringify(body) }),
   adminUsers: () => req('/admin/users'),

@@ -457,6 +457,25 @@ class GovernanceComplianceMetric(Base):
     sort_order = Column(Integer, default=0)
 
 
+class ComplianceRequirement(Base):
+    """Operational compliance item; workflow state remains authoritative."""
+    __tablename__ = "compliance_requirements"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    campus = Column(String, index=True, default="")
+    reference_code = Column(String, unique=True, index=True)
+    title = Column(String)
+    description = Column(Text, default="")
+    category = Column(String, default="")
+    responsible_department = Column(String, default="")
+    priority = Column(String, default="normal")
+    due_date = Column(Date, nullable=True)
+    evidence_reference = Column(Text, default="")
+    workflow_id = Column(String, ForeignKey("workflow_instances.id"), unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class GovernancePerformanceMetric(Base):
     __tablename__ = "governance_performance_metrics"
     id = Column(String, primary_key=True)
@@ -640,6 +659,7 @@ class HostelRoom(Base):
     __tablename__ = "hostel_rooms"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
+    campus = Column(String, default="")
     block = Column(String)             # A-Block
     room_no = Column(String)
     capacity = Column(Integer, default=2)
@@ -650,6 +670,7 @@ class HostelAllocation(Base):
     __tablename__ = "hostel_allocations"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
+    campus = Column(String, default="")
     room_id = Column(String, ForeignKey("hostel_rooms.id"))
     student_id = Column(String, default="")
     student_name = Column(String, default="")

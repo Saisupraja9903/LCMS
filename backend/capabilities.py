@@ -61,7 +61,7 @@ OFFICE_MODULES = {
     1:  ["governance", "analytics", "finance", "hr", "integrations", "approvals"], # Chairman
     2:  ["governance", "analytics", "finance", "approvals"],                       # Vice Chairman
     3:  ["analytics", "academics", "finance", "hr", "approvals"],                  # Campus Head
-    4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "hr", "procurement", "assets", "hostel", "transport", "grievance", "approvals"],  # Principal: branch oversight views
+    4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "hr", "procurement", "assets", "hostel", "transport", "grievance", "governance", "approvals"],  # Principal: branch oversight views
     5:  ["academics", "students", "attendance", "examinations", "approvals"],      # Vice Principal
     6:  ["academics", "students", "examinations", "research", "approvals"],        # Dean Academics
     7:  ["hr", "procurement", "assets", "finance", "approvals"],                   # Dean Administration
@@ -188,12 +188,12 @@ ACTION_OFFICE_ALLOW = {
     ("finance", "waive"): {4, 22, 23},                 # Principal/CFO, Finance, Accounts
     ("finance", "approve_budget"): {1, 2, 3, 4, 22, 40},
     ("hr", "post_job"): {24, 25, 26},
-    ("hr", "approve_leave"): {10, 24, 26},             # HOD, HR Mgr, Admin Mgr
-    ("hr", "reject_leave"): {10, 24, 26},
+    ("hr", "approve_leave"): {4, 10, 24, 26},          # Principal is the final stage of faculty leave
+    ("hr", "reject_leave"): {4, 10, 24, 26},
     ("library", "add_book"): {19},
     ("library", "issue"): {19},
     ("library", "return"): {19},
-    ("hostel", "allocate"): {8, 30},
+    ("hostel", "allocate"): {4, 8, 30},  # Principal approves campus hostel allocation
     ("hostel", "add_room"): {30},
     ("transport", "assign"): {31},
     ("transport", "add_route"): {31},
