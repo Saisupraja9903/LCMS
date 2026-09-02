@@ -1,11 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { Spinner, StatePill, Empty, money } from './ui'
 
 export default function Workflows({ user, onChange, initialTab = 'inbox', title = 'Workflows' }: { user: any; onChange: () => void; initialTab?: 'inbox' | 'mine' | 'all'; title?: string }) {
   const [tab, setTab] = useState<'inbox' | 'mine' | 'all'>(initialTab), [wfs, setWfs] = useState<any[]>([]), [loading, setLoading] = useState(true), [showStart, setShowStart] = useState(false), [selected, setSelected] = useState<any>(null), [error, setError] = useState('')
-  function load() { setLoading(true); setError(''); api.workflows(tab).then(r => setWfs(r.workflows)).catch(() => setError('Unable to load workflows.')).finally(() => setLoading(false)) }
-  useEffect(load, [tab])
+  const requestVersion = useRef(0)
+  async function load() {
+    const version = ++requestVersion.current
+    setLoading(true); setError(''); setWfs([])
+    try {
+      const response = await api.workflows(tab)
+      if (version === requestVersion.current) setWfs(response.workflows || [])
+    } catch (e: any) {
+      if (version === requestVersion.current) setError(e.message || 'Unable to load workflows.')
+    } finally {
+      if (version === requestVersion.current) setLoading(false)
+    }
+  }
+  useEffect(() => { void load() }, [tab])
   useEffect(() => { const id = sessionStorage.getItem('workflow-open'); if (!id) return; sessionStorage.removeItem('workflow-open'); api.workflow(id).then(setSelected).catch(() => setError('Unable to open the selected workflow.')) }, [])
   return <div className="fade-in principal-operations workflow-page"><div className="workflow-head"><div><h1>{title}</h1><p>Every request follows its configured approval chain, authority checks, and audit trail.</p></div><button className="btn btn-crimson" onClick={() => setShowStart(true)}>+ Initiate request</button></div><div className="workflow-tabs">{([['inbox', 'My office inbox'], ['mine', 'My requests'], ['all', 'All workflows']] as const).map(([id, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>)}</div>{error && <div className="workflow-error">{error}<button className="btn btn-out" onClick={load}>Retry</button></div>}{loading ? <Spinner /> : <section className="card workflow-list-card"><div className="tbl-scroll">{wfs.length === 0 ? <Empty icon="◇" text={tab === 'inbox' ? 'Nothing is awaiting your office.' : 'No workflows found.'} /> : <table className="tbl workflow-table"><thead><tr><th>Process</th><th>Request</th><th>Initiator</th><th>Amount</th><th>Stage</th><th>State</th><th></th></tr></thead><tbody>{wfs.map(wf => <tr key={wf.id}><td><b>{wf.label}</b></td><td className="workflow-title">{wf.title}</td><td>{wf.initiator}</td><td className="mono">{money(wf.amount)}</td><td className="mono">{wf.current_stage}/{wf.chain.length}</td><td><StatePill s={wf.state} /></td><td><button className="btn btn-out" onClick={() => setSelected(wf)}>Open</button></td></tr>)}</tbody></table>}</div></section>}{showStart && <StartModal onClose={() => setShowStart(false)} onDone={() => { setShowStart(false); load(); onChange() }} />}{selected && <DetailModal wf={selected} user={user} onClose={() => setSelected(null)} onDone={() => { load(); onChange() }} />}</div>
 }

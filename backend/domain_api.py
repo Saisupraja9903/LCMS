@@ -3220,8 +3220,10 @@ def compliance_requirements(q: str = "", category: str = "", status: str = "", p
     require(gate(s, ctx, "governance", "view")[0])
     if ctx.get("office_n") != 4:
         raise HTTPException(403, "Compliance requirements are available to the Principal only")
-    query = s.query(D.ComplianceRequirement).filter(D.ComplianceRequirement.tenant_id == ctx.get("tenant_id", TENANT))
-    if ctx.get("scope_level") == "campus": query = query.filter(D.ComplianceRequirement.campus == ctx.get("scope_ref"))
+    base_query = s.query(D.ComplianceRequirement).filter(D.ComplianceRequirement.tenant_id == ctx.get("tenant_id", TENANT))
+    if ctx.get("scope_level") == "campus": base_query = base_query.filter(D.ComplianceRequirement.campus == ctx.get("scope_ref"))
+    authorized_rows = base_query.order_by(D.ComplianceRequirement.due_date).all()
+    query = base_query
     if q:
         like = f"%{q}%"; query = query.filter(or_(D.ComplianceRequirement.title.ilike(like), D.ComplianceRequirement.reference_code.ilike(like)))
     if category: query = query.filter(D.ComplianceRequirement.category == category)
@@ -3229,9 +3231,10 @@ def compliance_requirements(q: str = "", category: str = "", status: str = "", p
     rows = query.order_by(D.ComplianceRequirement.due_date).all()
     payloads = [_compliance_requirement_payload(s, row) for row in rows]
     if status: payloads = [row for row in payloads if row["status"] == status]
+    authorized_payloads = [_compliance_requirement_payload(s, row) for row in authorized_rows]
     return {"requirements": payloads,
-            "filters": {"categories": sorted({row.category for row in rows}), "priorities": sorted({row.priority for row in rows}),
-                        "statuses": sorted({row["status"] for row in payloads})}}
+            "filters": {"categories": sorted({row.category for row in authorized_rows}), "priorities": sorted({row.priority for row in authorized_rows}),
+                        "statuses": sorted({row["status"] for row in authorized_payloads})}}
 
 
 @router.get("/compliance-requirements/{requirement_id}")

@@ -1,16 +1,44 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { Modal, PageHead, Spinner } from './kit'
 
 export default function PrincipalCompliance({ go }: any) {
-  const [data, setData] = useState<any>(null), [filters, setFilters] = useState<any>({ q: '', category: '', status: '', priority: '' }), [selected, setSelected] = useState<any>(null), [error, setError] = useState('')
-  const load = () => { setError(''); api.complianceRequirements(filters).then(setData).catch((e: any) => setError(e.message || 'Unable to load accreditation and compliance data.')) }
-  useEffect(load, [])
+  const emptyFilters = { q: '', category: '', status: '', priority: '' }
+  const [data, setData] = useState<any>(null), [filters, setFilters] = useState<any>(emptyFilters), [selected, setSelected] = useState<any>(null), [error, setError] = useState(''), [loading, setLoading] = useState(false)
+  const requestVersion = useRef(0)
+  const load = async (nextFilters = filters, resetScroll = false) => {
+    const version = ++requestVersion.current
+    if (resetScroll) window.scrollTo({ top: 0, behavior: 'auto' })
+    setError('')
+    setLoading(true)
+    setData((previous: any) => previous ? { ...previous, requirements: [] } : previous)
+    try {
+      const response = await api.complianceRequirements(nextFilters)
+      if (version === requestVersion.current) setData(response)
+    } catch (e: any) {
+      if (version === requestVersion.current) setError(e.message || 'Unable to load accreditation and compliance data.')
+    } finally {
+      if (version === requestVersion.current) setLoading(false)
+    }
+  }
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'auto' })
+    void load(emptyFilters)
+  }, [])
+  const updateFilter = (key: string, value: string) => {
+    const next = { ...filters, [key]: value }
+    setFilters(next)
+    void load(next, true)
+  }
+  const clear = () => {
+    setFilters(emptyFilters)
+    void load(emptyFilters, true)
+  }
   if (!data && !error) return <Spinner />
   if (error) return <div className="empty-state"><h3>Unable to load accreditation and compliance data.</h3><p>{error}</p><button className="btn btn-crimson" onClick={load}>Retry</button></div>
   return <div className="fade-in principal-operations"><PageHead title="Accreditation & Compliance" sub="Operational compliance requirements for your authorized campus." />
-    <div className="operations-filter"><input className="inp" value={filters.q} onChange={e => setFilters({ ...filters, q: e.target.value })} onKeyDown={e => e.key === 'Enter' && load()} placeholder="Search requirement or reference"/><select className="select" value={filters.category} onChange={e => setFilters({ ...filters, category: e.target.value })}><option value="">All categories</option>{data.filters.categories.map((x: string) => <option key={x}>{x}</option>)}</select><select className="select" value={filters.status} onChange={e => setFilters({ ...filters, status: e.target.value })}><option value="">All statuses</option>{data.filters.statuses.map((x: string) => <option key={x}>{x}</option>)}</select><select className="select" value={filters.priority} onChange={e => setFilters({ ...filters, priority: e.target.value })}><option value="">All priorities</option>{data.filters.priorities.map((x: string) => <option key={x}>{x}</option>)}</select><button className="btn btn-crimson" onClick={load}>Filter</button></div>
-    <section className="card"><div className="card-h"><h3>Compliance Requirements</h3><span className="hint">{data.requirements.length} in authorized campus</span></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Requirement</th><th>Category</th><th>Responsible Department</th><th>Campus</th><th>Priority</th><th>Due Date</th><th>Status</th><th></th></tr></thead><tbody>{data.requirements.map((item: any) => <tr key={item.id}><td><b>{item.title}</b><small>{item.reference_code}</small></td><td>{item.category}</td><td>{item.responsible_department}</td><td>{item.campus}</td><td><span className="tag">{item.priority}</span></td><td>{item.due_date || 'Not configured'}</td><td><span className="tag">{item.status}</span></td><td><button className="btn btn-out" onClick={() => api.complianceRequirement(item.id).then(setSelected).catch((e: any) => setError(e.message || 'Unable to load compliance requirement.'))}>View</button></td></tr>)}</tbody></table>{!data.requirements.length && <p className="principal-empty">No compliance requirements match these filters.</p>}</div></section>
+    <div className="operations-filter principal-compliance-filter"><input className="inp" value={filters.q} onChange={e => setFilters({ ...filters, q: e.target.value })} onKeyDown={e => e.key === 'Enter' && void load(filters, true)} placeholder="Search requirement or reference"/><select className="select" value={filters.category} onChange={e => updateFilter('category', e.target.value)}><option value="">All categories</option>{(data.filters?.categories || []).map((x: string) => <option key={x}>{x}</option>)}</select><select className="select" value={filters.status} onChange={e => updateFilter('status', e.target.value)}><option value="">All statuses</option>{(data.filters?.statuses || []).map((x: string) => <option key={x}>{x}</option>)}</select><select className="select" value={filters.priority} onChange={e => updateFilter('priority', e.target.value)}><option value="">All priorities</option>{(data.filters?.priorities || []).map((x: string) => <option key={x}>{x}</option>)}</select><button className="btn btn-crimson" onClick={() => void load(filters, true)}>Filter</button><button className="btn btn-out" onClick={clear}>Clear</button></div>
+    <section className="card"><div className="card-h"><h3>Compliance Requirements</h3><span className="hint">{data.requirements.length} in authorized campus{loading ? ' · Updating…' : ''}</span></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Requirement</th><th>Category</th><th>Responsible Department</th><th>Campus</th><th>Priority</th><th>Due Date</th><th>Status</th><th>Action</th></tr></thead><tbody>{data.requirements.length ? data.requirements.map((item: any) => <tr key={item.id}><td><b>{item.title}</b><small>{item.reference_code}</small></td><td>{item.category}</td><td>{item.responsible_department}</td><td>{item.campus}</td><td><span className="tag">{item.priority}</span></td><td>{item.due_date || 'Not configured'}</td><td><span className="tag">{item.status}</span></td><td><button className="btn btn-out" onClick={() => api.complianceRequirement(item.id).then(setSelected).catch((e: any) => setError(e.message || 'Unable to load compliance requirement.'))}>View</button></td></tr>) : <tr><td colSpan={8}><p className="principal-empty">No compliance requirements match these filters.</p></td></tr>}</tbody></table></div></section>
     {selected && <RequirementModal detail={selected.requirement} onClose={() => setSelected(null)} onRefresh={() => { api.complianceRequirement(selected.requirement.id).then(setSelected); load() }} go={go}/>}</div>
 }
 

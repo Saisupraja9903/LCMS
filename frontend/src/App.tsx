@@ -113,6 +113,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const [view, setView] = useState('overview')
   const [sideOpen, setSideOpen] = useState(false)
   const [notifs, setNotifs] = useState<any>({ notifications: [], unread: 0 })
+  const [workflowInboxCount, setWorkflowInboxCount] = useState(0)
   const [showNotif, setShowNotif] = useState(false)
   const [showRoles, setShowRoles] = useState(false)
   const [switching, setSwitching] = useState(false)
@@ -125,10 +126,21 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     api.notifications().then(setNotifs).catch(() => {})
   }
 
+  function loadWorkflowInbox() {
+    if (user?.office_n !== 4) return
+    api.workflows('inbox').then((response: any) => setWorkflowInboxCount(response.total ?? response.workflows?.length ?? 0)).catch(() => {})
+  }
+
+  function refreshSignals() {
+    loadNotifs()
+    loadWorkflowInbox()
+  }
+
   useEffect(() => {
     api.me().then(r => setUser(r.user)).catch(() => {})
     loadWs()
     loadNotifs()
+    loadWorkflowInbox()
     const timer = setInterval(loadNotifs, 20000)
     return () => clearInterval(timer)
   }, [])
@@ -261,8 +273,8 @@ export default function App({ onLogout }: { onLogout: () => void }) {
                     <NavGlyph moduleKey={module.key} principal={principalShell} />
                   </span>
                   <span className="nav-label">{module.label}</span>
-                  {module.key === 'workflows' && notifs.unread > 0 && (
-                    <span className="badge">{notifs.unread}</span>
+                  {module.key === 'workflows' && (principalShell ? workflowInboxCount : notifs.unread) > 0 && (
+                    <span className="badge">{principalShell ? workflowInboxCount : notifs.unread}</span>
                   )}
                 </button>
               ))}
@@ -377,7 +389,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
             if (showRoles) setShowRoles(false)
           }}
         >
-          <ModuleView view={view} module={current} user={user} onChange={loadNotifs} go={(next: string) => {
+          <ModuleView view={view} module={current} user={user} onChange={refreshSignals} go={(next: string) => {
             const riskShortcut = user.office_n === 4 && next === 'students' && sessionStorage.getItem('principal-student-risk') === 'at-risk'
             setView(riskShortcut ? 'at_risk_students' : next)
           }} />

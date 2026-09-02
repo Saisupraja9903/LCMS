@@ -1161,32 +1161,40 @@ def _visible_page_numbers(page: int, total_pages: int):
 
 @app.get("/api/workflows")
 def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
+    if scope not in ("inbox", "mine", "all"):
+        raise HTTPException(400, "Unknown workflow view")
+
+    def in_authorized_scope(workflow):
+        return A.scope_covers(ctx.get("scope_level", "individual"), workflow.scope_level or "individual")
+
     q = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT))
     pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     if scope == "mine":
-        q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
+        rows = (q.filter(WorkflowInstance.initiator_id == ctx["sub"])
+                .order_by(desc(WorkflowInstance.updated_at)).limit(100).all())
     elif scope == "inbox":
-        own_rows = (q.filter(WorkflowInstance.office_n == ctx["office_n"],
-                             WorkflowInstance.state.in_(pending_states))
-                     .order_by(desc(WorkflowInstance.updated_at)).all())
-        delegated = active_delegations_for(s, ctx["sub"])
-        if not delegated:
-            rows = own_rows[:100]
+        candidates = (q.filter(WorkflowInstance.state.in_(pending_states))
+                      .order_by(desc(WorkflowInstance.updated_at)).limit(220).all())
+        if ctx["office_n"] == 4:
+            # A Principal inbox is defined by the current approval stage, not
+            # by the office which originally owned the workflow process.
+            rows = [wf for wf in candidates
+                    if in_authorized_scope(wf) and _principal_workflow_actions(wf, _workflow_process(wf.process_key), ctx)[0]][:100]
         else:
-            candidate_rows = (s.query(WorkflowInstance)
-                              .filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT), WorkflowInstance.state.in_(pending_states))
-                              .order_by(desc(WorkflowInstance.updated_at)).limit(220).all())
+            own_rows = [wf for wf in candidates if wf.office_n == ctx["office_n"] and in_authorized_scope(wf)]
+            delegated = active_delegations_for(s, ctx["sub"])
             seen = {row.id for row in own_rows}
             rows = list(own_rows)
-            for wf in candidate_rows:
-                if wf.id in seen:
+            for wf in candidates:
+                if wf.id in seen or not in_authorized_scope(wf):
                     continue
-                if _delegation_matches_workflow(delegated, wf, ctx.get("scope_level", "individual")):
+                if delegated and _delegation_matches_workflow(delegated, wf, ctx.get("scope_level", "individual")):
                     rows.append(wf)
                     seen.add(wf.id)
             rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
     else:
-        rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
+        rows = [wf for wf in q.order_by(desc(WorkflowInstance.updated_at)).limit(220).all() if in_authorized_scope(wf)][:100]
+    rows = [wf for wf in rows if in_authorized_scope(wf)]
     out = []
     for wf in rows:
         proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
@@ -1194,7 +1202,7 @@ def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
         if ctx["office_n"] == 4:
             payload["available_actions"], payload["action_message"] = _principal_workflow_actions(wf, proc, ctx)
         out.append(payload)
-    return {"workflows": out}
+    return {"workflows": out, "total": len(out), "scope": scope}
 
 
 @app.get("/api/workflows/{wid}")
@@ -1204,6 +1212,8 @@ def get_workflow(wid: str, ctx=Depends(auth), s=Depends(db)):
         raise HTTPException(404, "Not found")
     if wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(403, "Workflow is outside your authorized tenant")
+    if not A.scope_covers(ctx.get("scope_level", "individual"), wf.scope_level or "individual"):
+        raise HTTPException(403, "Workflow is outside your authorized scope")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
     payload = _wf_payload(s, wf, proc)
     if ctx["office_n"] == 4:
