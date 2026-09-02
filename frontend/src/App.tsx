@@ -44,6 +44,11 @@ import { StudentAttendanceView, StudentCalendarView, StudentCoursesView, Student
 import FacultyHome from './personas/FacultyHome'
 import FacultySchedule from './personas/FacultySchedule'
 import ParentHome from './personas/ParentHome'
+import {
+  CampusProfile, BranchOperationalPlan, DepartmentsPrograms, LeadershipTeam,
+  AcademicSnapshot, StudentSnapshot, WorkforceOverview, InfrastructureOverview,
+  KPIDashboard, MyRequests, PolicyRepository, CampusHeadDashboard, CampusHeadApprovals
+} from './modules/CampusHeadPlaceholder'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -86,6 +91,31 @@ const PRINCIPAL_NAV = [
   ['Governance & Risk', 'Accreditation & Compliance', 'compliance'],
   ['Audit & Reporting', 'Audit', 'audit'], ['Audit & Reporting', 'Reports', 'analytics'],
   ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'permissions'],
+] as const
+
+// Campus Head navigation — executive oversight and coordination role.
+const CAMPUS_HEAD_NAV = [
+  ['OVERVIEW', 'Dashboard', 'overview'],
+  ['CAMPUS MANAGEMENT', 'Campus Profile', 'campus_profile'],
+  ['CAMPUS MANAGEMENT', 'Branch Operational Plan', 'branch_operational_plan'],
+  ['CAMPUS MANAGEMENT', 'Departments & Programs', 'departments_programs'],
+  ['CAMPUS MANAGEMENT', 'Leadership Team', 'leadership_team'],
+  ['CAMPUS MANAGEMENT', 'Campus Calendar', 'calendar'],
+  ['PERFORMANCE', 'Academic Snapshot', 'academic_snapshot'],
+  ['PERFORMANCE', 'Student Snapshot', 'student_snapshot'],
+  ['PERFORMANCE', 'Finance', 'finance'],
+  ['PERFORMANCE', 'Workforce', 'workforce'],
+  ['PERFORMANCE', 'Infrastructure', 'infrastructure'],
+  ['PERFORMANCE', 'Placements', 'placements'],
+  ['PERFORMANCE', 'KPI Dashboard', 'kpi_dashboard'],
+  ['AUTHORITY', 'My Approvals', 'approvals'],
+  ['AUTHORITY', 'Delegation', 'delegation'],
+  ['AUTHORITY', 'My Requests', 'my_requests'],
+  ['AUTHORITY', 'Escalations', 'escalations'],
+  ['REPORTS', 'Reports & Analytics', 'analytics'],
+  ['REPORTS', 'Audit Trail', 'audit'],
+  ['REFERENCE', 'Directory', 'directory'],
+  ['REFERENCE', 'Policy Repository', 'policy_repository'],
 ] as const
 
 // Faculty offices share the same functional modules, but need the focused
@@ -151,7 +181,8 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
     const principalVirtualModule = user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects', 'facilities', 'at_risk_students', 'compliance', 'approval_history', 'escalations', 'leave', 'recruitment', 'permissions'].includes(view)
-    if (!principalVirtualModule && !ws.modules.some((module: any) => module.key === view)) {
+    const campusHeadVirtualModule = user?.office_n === 3 && CAMPUS_HEAD_NAV.some(([, , key]) => key === view)
+    if (!principalVirtualModule && !campusHeadVirtualModule && !ws.modules.some((module: any) => module.key === view)) {
       setView(ws.modules[0].key)
     }
   }, [ws, view, user?.office_n])
@@ -202,15 +233,23 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
   const chairmanShell = user.office_n === 1
   const principalShell = user.office_n === 4
+  const campusHeadShell = user.office_n === 3
   const facultyShell = user.persona === 'faculty'
+  const campusHeadGroups = CAMPUS_HEAD_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    const enabled = true
+    ;(out[group] = out[group] || []).push({ key, label, group, enabled })
+    return out
+  }, {})
   const groups: Record<string, any[]> = {}
   displayModules.forEach((module: any) => {
     ;(groups[module.group] = groups[module.group] || []).push(module)
   })
   const order = chairmanShell ? CHAIRMAN_GROUP_ORDER : GROUP_ORDER
   const groupKeys = [...order.filter(key => groups[key]), ...Object.keys(groups).filter(key => !order.includes(key))]
+  const campusHeadCurrentItem = Object.values(campusHeadGroups).flat().find((item: any) => item.key === view)
   const current = displayModules.find((module: any) => module.key === view)
     || (principalShell && (view === 'leave' || view === 'recruitment') ? displayModules.find((module: any) => module.key === 'hr') : undefined)
+    || (campusHeadShell && campusHeadCurrentItem ? { key: view, label: campusHeadCurrentItem.label } : undefined)
     || displayModules[0]
   const principalGroups = PRINCIPAL_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
@@ -233,16 +272,16 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   }, {})
 
   return (
-    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''}`}>
+    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${campusHeadShell ? 'campus-head-shell' : ''} ${facultyShell ? 'faculty-shell' : ''}`}>
       <aside className={`sidebar ${sideOpen ? 'open' : ''}`}>
         <div className="brand">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {campusHeadShell ? <div className="campus-head-brand">CAMPUS HEAD PORTAL</div> : <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div className="seal">IC</div>
             <div>
               <div className="brand-name">ICMS</div>
               <div className="brand-sub">{principalShell ? 'Principal Portal' : facultyShell ? 'University Group' : 'University Group'}</div>
             </div>
-          </div>
+          </div>}
         </div>
 
         <div className="office-tag" style={{ ['--oc' as any]: color }}>
@@ -254,23 +293,23 @@ export default function App({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <nav className="side-nav">
-          {(principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : groupKeys).map(group => (
+          {(principalShell ? Object.keys(principalGroups) : campusHeadShell ? Object.keys(campusHeadGroups) : facultyShell ? Object.keys(facultyGroups) : groupKeys).map(group => (
             <div key={group}>
               <div className="side-sec">{group}</div>
-              {(principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : groups[group]).map((module: any) => (
+              {(principalShell ? principalGroups[group] : campusHeadShell ? campusHeadGroups[group] : facultyShell ? facultyGroups[group] : groups[group]).map((module: any) => (
                 <button
-                  key={(principalShell || facultyShell) ? `${group}-${module.label}` : module.key}
-                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || facultyShell) || module.enabled) ? 'on' : ''} ${(principalShell || facultyShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
+                  key={(principalShell || campusHeadShell || facultyShell) ? `${group}-${module.label}` : module.key}
+                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || campusHeadShell || facultyShell) || module.enabled) ? 'on' : ''} ${(principalShell || campusHeadShell || facultyShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
                   onClick={() => {
-                    if ((principalShell || facultyShell) && !module.enabled) return
+                    if ((principalShell || campusHeadShell || facultyShell) && !module.enabled) return
                     setView(module.key)
                     setSideOpen(false)
                   }}
-                  title={(principalShell || facultyShell) && !module.enabled ? 'This module is not available for your current role' : module.label}
+                  title={(principalShell || campusHeadShell || facultyShell) && !module.enabled ? 'This module is not available for your current role' : module.label}
                   type="button"
                 >
                   <span className="ico">
-                    <NavGlyph moduleKey={module.key} principal={principalShell} />
+                    <NavGlyph moduleKey={module.key} principal={principalShell} campusHead={campusHeadShell} />
                   </span>
                   <span className="nav-label">{module.label}</span>
                   {module.key === 'workflows' && (principalShell ? workflowInboxCount : notifs.unread) > 0 && (
@@ -409,7 +448,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Overview user={user} go={go} />
     case 'calendar':
       if (user.persona === 'student') return <StudentCalendarView user={user} go={go} />
-      return <Calendar user={user} caps={caps} />
+      return <Calendar user={user} caps={caps} readOnly={user.office_n === 3} />
     case 'my_schedule':
       if (user.persona === 'faculty') return <FacultySchedule user={user} go={go} />
       return <MySchedule user={user} go={go} />
@@ -444,7 +483,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Admissions caps={caps} />
     case 'finance':
       if (user.persona === 'student') return <StudentFeesView />
-      return <Finance caps={caps} />
+      return <Finance caps={caps} readOnly={user.office_n === 3} />
     case 'library':
       if (user.persona === 'student') return <StudentLibraryView />
       return <Library caps={caps} />
@@ -481,6 +520,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'approvals':
       return user.office_n === 1
         ? <ChairmanApprovals user={user} onChange={onChange} />
+        : user.office_n === 3
+          ? <CampusHeadApprovals />
         : <Workflows user={user} onChange={onChange} />
     case 'workflows':
       return <Workflows user={user} onChange={onChange} />
@@ -500,6 +541,29 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Permissions user={user} />
     case 'office_profile':
       return <OfficeProfile user={user} />
+    // Campus Head pages
+    case 'campus_profile':
+      return <CampusProfile />
+    case 'branch_operational_plan':
+      return <BranchOperationalPlan />
+    case 'departments_programs':
+      return <DepartmentsPrograms />
+    case 'leadership_team':
+      return <LeadershipTeam />
+    case 'academic_snapshot':
+      return <AcademicSnapshot />
+    case 'student_snapshot':
+      return <StudentSnapshot />
+    case 'workforce':
+      return <WorkforceOverview />
+    case 'infrastructure':
+      return <InfrastructureOverview />
+    case 'kpi_dashboard':
+      return <KPIDashboard />
+    case 'my_requests':
+      return <MyRequests />
+    case 'policy_repository':
+      return <PolicyRepository />
     default:
       return <Overview user={user} go={go} />
   }
@@ -550,10 +614,32 @@ function ChevronDownIcon() {
   )
 }
 
-function NavGlyph({ moduleKey, principal = false }: { moduleKey: string; principal?: boolean }) {
+function NavGlyph({ moduleKey, principal = false, campusHead = false }: { moduleKey: string; principal?: boolean; campusHead?: boolean }) {
   switch (moduleKey) {
     case 'overview':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 11.5 12 5l8 6.5V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1v-8.5Z" /></svg>
+    case 'campus_profile':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 20V8l5-3 5 3v12" /><path d="M9 11h.01M15 11h.01M9 15h.01M15 15h.01" /></svg>
+    case 'branch_operational_plan':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M11 5h8M11 9h8M11 13h5" /><path d="M6 4H4a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h2" /><path d="m8 17 2 2 4-4" /></svg>
+    case 'departments_programs':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m3 8 9-4 9 4-9 4-9-4Z" /><path d="M7 10v4c0 1.7 2.2 3 5 3s5-1.3 5-3v-4" /></svg>
+    case 'leadership_team':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="9" cy="8" r="3" /><circle cx="17" cy="9" r="2.3" /><path d="M3.5 20a5.5 5.5 0 0 1 11 0M14 20a4 4 0 0 1 6.5-3.1" /></svg>
+    case 'academic_snapshot':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 0 4 23V5.5Z" /><path d="M12 3v18" /></svg>
+    case 'student_snapshot':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m3 8 9-4 9 4-9 4-9-4Z" /><path d="M7 10v4c0 1.7 2.2 3 5 3s5-1.3 5-3v-4" /></svg>
+    case 'workforce':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="7" r="3.5" /><path d="M5 20a7 7 0 0 1 14 0" /></svg>
+    case 'infrastructure':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m14 6 4-4 2 2-4 4" /><path d="m13 7-8.5 8.5a2.1 2.1 0 1 0 3 3L16 10" /><path d="m5 5 3 3M4 10l2-2" /></svg>
+    case 'kpi_dashboard':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /></svg>
+    case 'my_requests':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h11M4 12h16M4 17h9" /><circle cx="18" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></svg>
+    case 'policy_repository':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 4h12v16H6z" /><path d="M9 4v16" /></svg>
     case 'at_risk_students':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 4 3.8 19h16.4L12 4Z" /><path d="M12 10v4M12 17h.01" /></svg>
     case 'faculty_staff':
@@ -631,7 +717,7 @@ function NavGlyph({ moduleKey, principal = false }: { moduleKey: string; princip
     case 'admin':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a2 2 0 1 1-4 0v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a2 2 0 1 1 0-4h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a2 2 0 1 1 4 0v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H20a2 2 0 1 1 0 4h-.2a1 1 0 0 0-.9.6Z" /></svg>
     default:
-      return principal
+      return principal || campusHead
         ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></svg>
         : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="8" /></svg>
   }

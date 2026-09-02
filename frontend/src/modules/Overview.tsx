@@ -2,9 +2,11 @@ import { api } from '../api'
 import { PageHead, Kpis, Spinner, money, useLoad } from './kit'
 import ChairmanOverview from './ChairmanOverview'
 import PrincipalDashboard from './PrincipalDashboard'
+import { CampusHeadDashboard } from './CampusHeadPlaceholder'
 
 export default function Overview({ user, go }: { user: any; go: (v: string) => void }) {
   if (user.office_n === 1) return <ChairmanOverview go={go} />
+  if (user.office_n === 3) return <CampusHeadDashboard user={user} go={go} />
   if (user.office_n === 4) return <PrincipalDashboard user={user} go={go} />
   const [data, loading] = useLoad<any>(() => api.overview())
   if (loading || !data) return <Spinner />

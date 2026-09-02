@@ -268,11 +268,15 @@ CREATE TABLE workflow_instances (
 	initiator_name VARCHAR, 
 	current_stage INTEGER, 
 	scope_level VARCHAR, 
+	campus_scope_id VARCHAR, 
 	escalated BOOLEAN, 
 	created_at TIMESTAMP WITHOUT TIME ZONE, 
 	updated_at TIMESTAMP WITHOUT TIME ZONE, 
-	PRIMARY KEY (id)
+	PRIMARY KEY (id),
+	FOREIGN KEY(campus_scope_id) REFERENCES org_scopes (id)
 );
+
+CREATE INDEX ix_workflow_instances_campus_scope_id ON workflow_instances (campus_scope_id);
 
 CREATE TABLE approvals (
 	id VARCHAR NOT NULL, 

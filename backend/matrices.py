@@ -67,6 +67,9 @@ def rbac_for(office_n: int, level: int, verb: str) -> str:
 # Each: key, label, chain[initiator, reviewer, approver, final], escalation,
 #       owning office_n, valid workflow states for progression, has_amount
 APPROVAL_MATRIX = [
+    {"key": "branch_operational_plan", "label": "Branch Operational Plan", "office_n": 3,
+     "chain": ["Campus Head", "Vice Chairman"],
+     "escalation": "Vice Chairman", "amount": False},
     {"key": "compliance_requirement", "label": "Compliance requirement", "office_n": 4,
      "chain": ["Responsible Department", "IQAC", "Principal", "Vice Chairman"],
      "escalation": "Vice Chairman", "amount": False},
@@ -127,6 +130,9 @@ APPROVAL_MATRIX = [
     {"key": "infrastructure_capex", "label": "Infrastructure / capex", "office_n": 29,
      "chain": ["Any office", "Maintenance/Facilities", "Principal", "VC/Chairman"],
      "escalation": "Chairman", "amount": True},
+    {"key": "infrastructure_capex_v2", "label": "Infrastructure / capex", "office_n": 29,
+     "chain": ["Any office", "Maintenance/Facilities", "Principal", "Campus Head", "VC/Chairman"],
+     "escalation": "Chairman", "amount": True},
     {"key": "recruitment", "label": "Recruitment / promotion", "office_n": 24,
      "chain": ["HR", "HR Director", "Principal", "VC"],
      "escalation": "Chairman", "amount": False},
@@ -139,8 +145,8 @@ APPROVAL_MATRIX = [
 ]
 
 # Workflow states every request moves through (Document §7, office workflow images).
-WF_STATES = ["draft", "submitted", "under_review", "reviewed", "approved",
-             "executed", "rejected", "escalated"]
+WF_STATES = ["draft", "submitted", "under_review", "reviewed", "returned", "approved",
+             "active", "executed", "rejected", "escalated"]
 
 # Which state must an entity be in for each action to be valid (Document §7 step 11).
 WF_VALID = {

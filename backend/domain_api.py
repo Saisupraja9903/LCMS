@@ -2449,7 +2449,13 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
 @router.get("/finance/budget")
 def list_budget(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
-    rows = s.query(D.BudgetLine).all()
+    query = s.query(D.BudgetLine)
+    if ctx.get("office_n") == 3 and ctx.get("scope_level") == "campus":
+        campus = (ctx.get("scope_ref") or "").strip()
+        if not campus or campus.startswith("scope_"):
+            raise HTTPException(403, "Your Campus Head account has no assigned campus scope")
+        query = query.filter(D.BudgetLine.campus == campus)
+    rows = query.all()
     return {"budget": [{"category": b.category, "allocated": b.allocated,
                         "spent": b.spent, "remaining": b.allocated - b.spent,
                         "fiscal_year": b.fiscal_year} for b in rows],

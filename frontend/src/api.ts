@@ -52,6 +52,11 @@ export const api = {
     req('/workflows/decide', { method: 'POST', body: JSON.stringify({ workflow_id, action, reason }) }),
   workflows: (scope = 'all') => req(`/workflows?scope=${scope}`),
   workflow: (id: string) => req(`/workflows/${id}`),
+  bop: () => req('/bop'),
+  createBop: (body: any) => req('/bop', { method: 'POST', body: JSON.stringify(body) }),
+  updateBop: (id: string, body: any) => req(`/bop/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  submitBop: (id: string) => req(`/bop/${encodeURIComponent(id)}/submit`, { method: 'POST' }),
+  resubmitBop: (id: string) => req(`/bop/${encodeURIComponent(id)}/resubmit`, { method: 'POST' }),
   approvalHistory: (filters: Record<string, string> = {}) => req(`/approval-history?${new URLSearchParams(filters).toString()}`),
   escalations: (filters: Record<string, string> = {}) => req(`/escalations?${new URLSearchParams(filters).toString()}`),
   chairmanApprovals: (params: Record<string, any> = {}) => {

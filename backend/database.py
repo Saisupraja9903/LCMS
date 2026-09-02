@@ -100,6 +100,9 @@ def ensure_additive_schema():
         "hostel_allocations": [
             ("campus", "VARCHAR DEFAULT ''"),
         ],
+        "workflow_instances": [
+            ("campus_scope_id", "VARCHAR"),
+        ],
     }
 
     with engine.begin() as conn:
@@ -112,6 +115,13 @@ def ensure_additive_schema():
                 if column_name in existing:
                     continue
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
+        if inspector.has_table("workflow_instances") and inspector.has_table("org_scopes"):
+            indexes = {index["name"] for index in inspect(conn).get_indexes("workflow_instances")}
+            if "ix_workflow_instances_campus_scope_id" not in indexes:
+                conn.execute(text("CREATE INDEX ix_workflow_instances_campus_scope_id ON workflow_instances (campus_scope_id)"))
+            foreign_keys = {fk.get("name") for fk in inspect(conn).get_foreign_keys("workflow_instances")}
+            if conn.dialect.name == "postgresql" and "fk_workflow_instances_campus_scope" not in foreign_keys:
+                conn.execute(text("ALTER TABLE workflow_instances ADD CONSTRAINT fk_workflow_instances_campus_scope FOREIGN KEY (campus_scope_id) REFERENCES org_scopes (id)"))
         # Older hostel rows pre-date campus ownership.  Room inventory in the
         # original seed belongs to Main Campus; allocation rows can only be
         # backfilled when they are linked to an actual student record.
@@ -300,6 +310,10 @@ def seed():
         principal = s.get(User, "user_4")
         if principal and principal.scope_ref == "scope_global":
             principal.scope_ref = CAMPUS_SCOPES[0]
+
+        campus_head = s.get(User, "user_3")
+        if campus_head and campus_head.scope_ref == "scope_global":
+            campus_head.scope_ref = CAMPUS_SCOPES[0]
 
         s.commit()
         return {"status": "seeded", "offices": len(OFFICES),

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { api } from '../api'
 import { PageHead, Spinner, DecisionToast, Modal, money, GatedBtn } from './kit'
 
-export default function Finance({ caps }: { caps: any }) {
+export default function Finance({ caps, readOnly = false }: { caps: any; readOnly?: boolean }) {
   const [tab, setTab] = useState<'fees' | 'budget'>('fees')
   const [data, setData] = useState<any>(null)
   const [budget, setBudget] = useState<any>(null)
@@ -50,7 +50,7 @@ export default function Finance({ caps }: { caps: any }) {
         <div className="card">
           <div className="tbl-scroll">
             <table className="tbl">
-              <thead><tr><th>Roll No</th><th>Name</th><th>Billed</th><th>Paid</th><th>Balance</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
+                <thead><tr><th>Roll No</th><th>Name</th><th>Billed</th><th>Paid</th><th>Balance</th><th>Status</th>{!readOnly && <th style={{ textAlign: 'right' }}>Actions</th>}</tr></thead>
               <tbody>
                 {data.invoices.slice(0, 80).map((r: any) => (
                   <tr key={r.id}>
@@ -60,12 +60,12 @@ export default function Finance({ caps }: { caps: any }) {
                     <td>{money(r.paid)}</td>
                     <td><b style={{ color: r.balance > 0 ? 'var(--rose)' : 'var(--teal)' }}>{money(r.balance)}</b></td>
                     <td><span className={`pill s-${r.status}`}>{r.status}</span></td>
-                    <td style={{ textAlign: 'right' }}>
+                    {!readOnly && <td style={{ textAlign: 'right' }}>
                       <div className="row-actions">
                         <button className="btn btn-sm btn-out" disabled={!caps.record_payment || r.balance <= 0} onClick={() => { setModal({ kind: 'pay', inv: r }); setAmount(String(r.balance)) }}>Payment</button>
                         <button className="btn btn-sm btn-brass" disabled={!caps.waive || r.balance <= 0} onClick={() => { setModal({ kind: 'waive', inv: r }); setAmount(String(r.balance)) }}>Waive</button>
                       </div>
-                    </td>
+                    </td>}
                   </tr>
                 ))}
               </tbody>
