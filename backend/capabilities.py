@@ -46,6 +46,9 @@ MODULES = {
     "directory":    {"label": "Directory",     "icon": "▦", "group": "Reference"},
     "matrices":     {"label": "Matrices",      "icon": "▩", "group": "Reference"},
     "governance":   {"label": "Governance",    "icon": "🏛", "group": "Authority"},
+    "risks":        {"label": "Risk & Issues", "icon": "⚠", "group": "Performance"},
+    "escalations":  {"label": "Escalations", "icon": "↗", "group": "Authority"},
+    "campus_reports": {"label": "Reports & Analytics", "icon": "▤", "group": "Reports"},
     "admin":        {"label": "System Admin",  "icon": "⚙", "group": "Authority"},
     "analytics":    {"label": "Analytics",     "icon": "📊", "group": "Workspace"},
     "integrations": {"label": "Integrations",  "icon": "🔌", "group": "Platform"},
@@ -60,7 +63,7 @@ BASE_MODULES = ["overview", "calendar", "academic_calendar",
 OFFICE_MODULES = {
     1:  ["governance", "analytics", "finance", "hr", "integrations", "approvals"], # Chairman
     2:  ["governance", "analytics", "finance", "approvals"],                       # Vice Chairman
-    3:  ["analytics", "academics", "finance", "hr", "approvals"],                  # Campus Head
+    3:  ["analytics", "academics", "finance", "hr", "approvals", "risks"],        # Campus Head
     4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "hr", "procurement", "assets", "hostel", "transport", "grievance", "governance", "approvals"],  # Principal: branch oversight views
     5:  ["academics", "students", "attendance", "examinations", "approvals"],      # Vice Principal
     6:  ["academics", "students", "examinations", "research", "approvals"],        # Dean Academics
@@ -145,6 +148,13 @@ MODULE_ACTIONS = {
     "governance":   {"view": "view", "publish_policy": "publish", "edit_dashboard": "edit"},
     "admin":        {"view": "view", "configure": "configure"},
     "approvals":    {"view": "view", "approve": "approve", "reject": "reject"},
+    "risks":        {"view": "view", "create": "create", "edit": "edit", "assign": "assign",
+                     "corrective_action": "create", "corrective_update": "edit",
+                     "resolve": "edit", "close": "edit", "escalate": "approve"},
+        "escalations": {"view": "view", "create": "create", "edit": "edit", "submit": "submit",
+                                        "follow_up": "edit", "resolve": "edit", "close": "edit"},
+        "campus_reports": {"view": "view", "create": "create", "edit": "edit", "submit": "submit",
+                                             "resubmit": "submit", "review": "review", "return": "edit", "approve": "approve"},
 }
 
 

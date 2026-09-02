@@ -163,14 +163,22 @@ WF_VALID = {
 # scope_level -> {process_key -> threshold}. Above threshold auto-escalates.
 APPROVAL_LIMITS = {
     "campus":     {"fee_waiver": 100000, "refund": 100000, "purchase_request": 500000,
-                   "payroll_approval": 2000000, "infrastructure_capex": 1000000},
+                   "payroll_approval": 2000000, "infrastructure_capex": 1000000,
+                   "infrastructure_capex_v2": 1000000},
     "university": {"fee_waiver": 500000, "refund": 500000, "purchase_request": 5000000,
-                   "payroll_approval": 20000000, "infrastructure_capex": 10000000},
+                   "payroll_approval": 20000000, "infrastructure_capex": 10000000,
+                   "infrastructure_capex_v2": 10000000},
     "faculty":    {"fee_waiver": 50000, "refund": 50000, "purchase_request": 200000,
-                   "infrastructure_capex": 300000},
+                   "infrastructure_capex": 300000, "infrastructure_capex_v2": 300000},
     "department": {"fee_waiver": 20000, "refund": 20000, "purchase_request": 75000},
     "global":     {"fee_waiver": 10000000, "refund": 10000000, "purchase_request": 100000000,
-                   "payroll_approval": 100000000, "infrastructure_capex": 100000000},
+                   "payroll_approval": 100000000, "infrastructure_capex": 100000000,
+                   "infrastructure_capex_v2": 100000000},
+}
+
+RISK_ESCALATION_TARGETS = {
+    "HIGH": (2, "Vice Chairman"),
+    "CRITICAL": (1, "Chairman"),
 }
 
 

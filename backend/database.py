@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 
 from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
                     RolePermission, ApprovalLimit, UserRole, Designation)
+import domain_models  # Ensure all declarative models are registered before metadata.create_all().
 from authority import pwhash, VERBS, scope_covers
 from matrices import (rbac_for, APPROVAL_LIMITS, scope_for, APPROVAL_MATRIX)
 
@@ -188,6 +189,11 @@ def _ensure_staff_contact_columns():
                 connection.execute(text(f"ALTER TABLE staff_members ADD COLUMN {name} {column_type}"))
 
 
+def level_privileged(level: int) -> bool:
+    # MFA for staff & privileged roles (Document §7 step 3) — students/parents optional.
+    return level <= 7
+
+
 # Demo username for each office head (matches the login screen's demo accounts).
 DEMO_USERNAMES = {
     1: "chairman", 2: "vice_chairman", 3: "campus_head", 4: "principal",
@@ -202,6 +208,13 @@ DEMO_USERNAMES = {
     34: "security", 35: "front_office", 36: "student", 37: "parent",
     38: "alumni", 39: "external_auditor", 40: "governing_body",
 }
+
+
+# Keep the SQLite test database aligned with the approved model even when an older
+# file already exists and startup seed is skipped by tests that use SessionLocal directly.
+# The local DB also needs the baseline org-scope and demo-user records that the
+# workflow approval path validates against; bootstrap them once at import time.
+ensure_additive_schema()
 
 
 def seed():
@@ -323,6 +336,14 @@ def seed():
         s.close()
 
 
-def level_privileged(level: int) -> bool:
-    # MFA for staff & privileged roles (Document §7 step 3) — students/parents optional.
-    return level <= 7
+# Bootstrap the SQLite database for local/test execution. This is deliberately
+# minimal and idempotent so that legacy DB files are upgraded and the reference
+# data used by workflow decisions is present before any endpoint logic runs.
+ensure_additive_schema()
+try:
+    seed()
+except Exception as e:
+    # Seed may partially fail on import; let the normal app startup handle it.
+    # The critical schema must be present for tests to work.
+    import sys
+    print(f"Warning: seed at import time partially failed: {e}", file=sys.stderr)

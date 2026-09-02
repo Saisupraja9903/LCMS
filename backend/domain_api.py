@@ -8,6 +8,7 @@ and is written to the hash-chained audit log. Actions the office may not perform
 return 403 with the engine's reason — the same verdict the UI uses to disable
 the control.
 """
+import json
 from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -15,8 +16,9 @@ from sqlalchemy import and_, desc, func, or_
 
 from core import db, auth, uid, write_audit, notify, active_delegation_for
 from database import office, TENANT, slug
-from authority import authorize, ALLOW
-from matrices import rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS, APPROVAL_MATRIX
+from authority import authorize, ALLOW, scope_covers
+from matrices import (rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS,
+                       APPROVAL_MATRIX, RISK_ESCALATION_TARGETS)
 from capabilities import (modules_for_office, module_meta, MODULE_ACTIONS,
                           MODULES, action_allowed_for_office)
 import domain_models as D
@@ -2763,6 +2765,8 @@ def approval_history(q: str = "", action: str = "", ctx=Depends(auth), s=Depends
 def escalations(q: str = "", state: str = "", ctx=Depends(auth), s=Depends(db)):
     """Workflow-state escalation views; no redundant escalation table."""
     require(gate(s, ctx, "approvals", "view")[0])
+    if ctx.get("office_n") == 3:
+        return phase5d_escalations(status=state, ctx=ctx, s=s)
     query = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT), WorkflowInstance.escalated.is_(True))
     if state:
         query = query.filter(WorkflowInstance.state == state)
@@ -2959,6 +2963,818 @@ def resolve_complaint(body: ResolveIn, ctx=Depends(auth), s=Depends(db)):
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "grievance.resolve",
                 f"complaint:{c.id}", "open", c.status, f"Set {c.subject} → {c.status}")
     return {"status": c.status, "decision": dec.as_dict()}
+
+
+# --------------------------------------------------------------------------- #
+#  CAMPUS ESCALATIONS & REPORTING
+# ---------------------------------------------------------------------------
+ESCALATION_PRIORITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+ESCALATION_STATUSES = {"DRAFT", "SUBMITTED", "RECEIVED", "FOLLOW_UP", "RESOLVED", "CLOSED"}
+REPORT_TYPES = {"MONTHLY_CAMPUS_REPORT", "IMMEDIATE_RISK_EXCEPTION_REPORT"}
+REPORT_STATUSES = {"DRAFT", "SUBMITTED", "VC_REVIEW", "RETURNED", "RESUBMITTED", "APPROVED"}
+
+
+def _phase5d_scope(s, ctx):
+    if ctx.get("office_n") not in (1, 2, 3):
+        raise HTTPException(403, "This action is restricted to authorized escalation/report offices")
+    tenant_id = ctx.get("tenant_id", TENANT)
+    query = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id, OrgScope.level == "campus")
+    ref = (ctx.get("scope_ref") or "").strip()
+    scope = query.filter(OrgScope.id == ref).first() if ref.startswith("scope_") else query.filter(OrgScope.name == ref).first()
+    if ctx.get("office_n") == 3 and not scope:
+        raise HTTPException(403, "A canonical campus scope is required")
+    return scope
+
+
+def _phase5d_gate(s, ctx, module, action):
+    decision, _ = gate(s, ctx, module, action)
+    require(decision)
+    return decision
+
+
+def _escalation_destination(s, source_type, source_ref, priority, ctx):
+    category = ""
+    if source_type == "risk":
+        risk, _ = _risk_or_404(s, source_ref, ctx)
+        category = risk.category
+    if priority == "CRITICAL":
+        if category in ("Safety", "Compliance", "Administration", "Operations"):
+            return 1, "Chairman", [2]
+        return 2, "Vice Chairman", [4]
+    if priority == "HIGH":
+        if category in ("Academic", "Student", "Faculty/Workforce", "Compliance"):
+            return 4, "Principal", []
+        return 2, "Vice Chairman", []
+    return 4, "Principal", []
+
+
+def _escalation_event(s, row, ctx, event_type, previous, current, reason=""):
+    event = D.EscalationEvent(id=uid(), tenant_id=ctx.get("tenant_id", TENANT), escalation_id=row.id,
+                              actor_id=ctx["sub"], event_type=event_type, reason=reason,
+                              previous_status=previous, new_status=current)
+    s.add(event); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], f"escalation.{event_type}", f"escalation:{row.id}", previous, current, reason, ctx.get("auth_level", "mfa"))
+
+
+def _escalation_payload(s, row):
+    return {"id": row.id, "tenant_id": row.tenant_id, "campus_scope_id": row.campus_scope_id,
+            "created_by": row.created_by, "owner_id": row.owner_id, "owner": _risk_owner_name(s, row.owner_id),
+            "source_type": row.source_type, "source_ref": row.source_ref, "reason": row.reason,
+            "priority": row.priority, "destination_office_n": row.destination_office_n,
+            "destination_user_id": row.destination_user_id, "destination": office(row.destination_office_n).get("name", ""),
+            "status": row.status, "due_at": row.due_at.isoformat() if row.due_at else None,
+            "received_at": row.received_at.isoformat() if row.received_at else None,
+            "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+            "closed_at": row.closed_at.isoformat() if row.closed_at else None,
+            "resolution_notes": row.resolution_notes, "workflow_id": row.workflow_id,
+            "overdue": bool(row.due_at and row.due_at < datetime.utcnow() and row.status not in ("RESOLVED", "CLOSED")),
+            "created_at": row.created_at.isoformat(), "updated_at": row.updated_at.isoformat()}
+
+
+class EscalationCreateIn(BaseModel):
+    source_type: str
+    source_ref: str
+    reason: str
+    priority: str
+    owner_id: str | None = None
+    due_at: datetime | None = None
+
+
+class EscalationUpdateIn(BaseModel):
+    reason: str | None = None
+    owner_id: str | None = None
+    due_at: datetime | None = None
+
+
+class Phase5DReasonIn(BaseModel):
+    reason: str = ""
+    feedback: str = ""
+
+
+class ReportCreateIn(BaseModel):
+    report_type: str
+    period_start: date
+    period_end: date
+    title: str
+
+
+class ReportUpdateIn(BaseModel):
+    title: str | None = None
+    period_start: date | None = None
+    period_end: date | None = None
+
+
+class ReportFeedbackIn(BaseModel):
+    feedback: str = ""
+
+
+def _escalation_or_404(s, escalation_id, ctx):
+    campus = _phase5d_scope(s, ctx)
+    query = s.query(D.EscalationRecord).filter(D.EscalationRecord.id == escalation_id,
+                                               D.EscalationRecord.tenant_id == ctx.get("tenant_id", TENANT))
+    if ctx.get("office_n") == 3:
+        query = query.filter(D.EscalationRecord.campus_scope_id == campus.id)
+    row = query.first()
+    if not row:
+        raise HTTPException(404, "Escalation not found")
+    return row
+
+
+@router.get("/escalations")
+def phase5d_escalations(status: str = "", priority: str = "", source_type: str = "", destination_office_n: int | None = None, ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "escalations", "view")
+    query = s.query(D.EscalationRecord).filter(D.EscalationRecord.tenant_id == ctx.get("tenant_id", TENANT))
+    campus = _phase5d_scope(s, ctx)
+    if ctx.get("office_n") == 3:
+        query = query.filter(D.EscalationRecord.campus_scope_id == campus.id)
+    if status:
+        if status not in ESCALATION_STATUSES: raise HTTPException(400, "Unknown escalation status")
+        query = query.filter(D.EscalationRecord.status == status)
+    if priority:
+        if priority not in ESCALATION_PRIORITIES: raise HTTPException(400, "Unknown escalation priority")
+        query = query.filter(D.EscalationRecord.priority == priority)
+    if source_type: query = query.filter(D.EscalationRecord.source_type == source_type)
+    if destination_office_n: query = query.filter(D.EscalationRecord.destination_office_n == destination_office_n)
+    rows = query.order_by(desc(D.EscalationRecord.updated_at)).all()
+    return {"escalations": [_escalation_payload(s, row) for row in rows], "total": len(rows)}
+
+
+@router.post("/escalations")
+def create_escalation(body: EscalationCreateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _phase5d_gate(s, ctx, "escalations", "create")
+    campus = _phase5d_scope(s, ctx)
+    if body.priority not in ESCALATION_PRIORITIES or body.source_type != "risk":
+        raise HTTPException(400, "Escalations must reference a supported risk source and priority")
+    risk, _ = _risk_or_404(s, body.source_ref, ctx)
+    destination_office, _, additional_offices = _escalation_destination(s, body.source_type, body.source_ref, body.priority, ctx)
+    owner = _risk_owner_for_scope(s, body.owner_id, campus, ctx.get("tenant_id", TENANT)) if body.owner_id else None
+    escalation_id = uid()
+    row = D.EscalationRecord(id=escalation_id, tenant_id=ctx.get("tenant_id", TENANT), campus_scope_id=campus.id,
+                             created_by=ctx["sub"], owner_id=owner.id if owner else risk.owner_id,
+                             source_type=body.source_type, source_ref=body.source_ref, reason=body.reason.strip(),
+                             priority=body.priority, destination_office_n=destination_office, status="DRAFT", due_at=body.due_at)
+    s.add(row); s.commit(); _escalation_event(s, row, ctx, "create", "", "DRAFT", row.reason)
+    return {"escalation": _escalation_payload(s, row), "decision": decision.as_dict(), "additional_destinations": additional_offices}
+
+
+@router.post("/risks/{risk_id}/escalations")
+def create_risk_escalation(risk_id: str, body: EscalationCreateIn, ctx=Depends(auth), s=Depends(db)):
+    body.source_type = "risk"; body.source_ref = risk_id
+    return create_escalation(body, ctx, s)
+
+
+@router.get("/escalations/{escalation_id}")
+def get_escalation(escalation_id: str, ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "escalations", "view")
+    row = _escalation_or_404(s, escalation_id, ctx)
+    events = s.query(D.EscalationEvent).filter(D.EscalationEvent.escalation_id == row.id).order_by(D.EscalationEvent.created_at).all()
+    return {"escalation": _escalation_payload(s, row), "events": [{"id": e.id, "event_type": e.event_type, "reason": e.reason, "previous_status": e.previous_status, "new_status": e.new_status, "created_at": e.created_at.isoformat()} for e in events]}
+
+
+@router.patch("/escalations/{escalation_id}")
+def update_escalation(escalation_id: str, body: EscalationUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _phase5d_gate(s, ctx, "escalations", "edit")
+    row = _escalation_or_404(s, escalation_id, ctx)
+    if row.created_by != ctx["sub"] or row.status not in ("DRAFT", "FOLLOW_UP"):
+        raise HTTPException(403, "Only the creator may edit a draft or follow-up escalation")
+    if body.reason is not None: row.reason = body.reason.strip()
+    if body.due_at is not None: row.due_at = body.due_at
+    if body.owner_id is not None: row.owner_id = _risk_owner_for_scope(s, body.owner_id, _phase5d_scope(s, ctx), ctx.get("tenant_id", TENANT)).id
+    row.updated_at = datetime.utcnow(); s.commit(); _escalation_event(s, row, ctx, "follow_up", row.status, row.status, row.reason)
+    return {"escalation": _escalation_payload(s, row), "decision": decision.as_dict()}
+
+
+def _change_escalation(escalation_id, target, event_type, body, ctx, s):
+    action = "submit" if target == "SUBMITTED" else "follow_up" if target == "FOLLOW_UP" else "resolve" if target == "RESOLVED" else "close"
+    decision = _phase5d_gate(s, ctx, "escalations", action)
+    row = _escalation_or_404(s, escalation_id, ctx); previous = row.status
+    allowed = {"SUBMITTED": {"DRAFT"}, "RECEIVED": {"SUBMITTED"}, "FOLLOW_UP": {"RECEIVED", "SUBMITTED"}, "RESOLVED": {"FOLLOW_UP", "RECEIVED", "SUBMITTED"}, "CLOSED": {"RESOLVED"}}
+    if previous not in allowed[target]: raise HTTPException(409, f"Cannot transition escalation from {previous} to {target}")
+    if target == "CLOSED" and row.created_by == ctx["sub"] and ctx.get("office_n") == 3:
+        raise HTTPException(403, "Independent review is required before creator closure")
+    row.status = target; row.updated_at = datetime.utcnow()
+    if target == "RECEIVED": row.received_at = row.updated_at
+    if target == "RESOLVED": row.resolved_at = row.updated_at
+    if target == "CLOSED": row.closed_at = row.updated_at; row.resolution_notes = body.feedback if hasattr(body, "feedback") else body.reason
+    s.commit(); _escalation_event(s, row, ctx, event_type, previous, target, getattr(body, "reason", "") or getattr(body, "feedback", ""))
+    if target == "SUBMITTED":
+        recipients = [row.destination_user_id] if row.destination_user_id else []
+        recipients.extend(user.id for office_n in ([row.destination_office_n] + ([2] if row.priority == "CRITICAL" and row.destination_office_n == 1 else []))
+                          for user in s.query(User).filter(User.tenant_id == row.tenant_id, User.office_n == office_n, User.status == "active").all())
+        for recipient_id in set(recipients):
+            notify(s, recipient_id, "Escalation received", f"escalation:{row.id} — {row.reason}", severity="critical" if row.priority == "CRITICAL" else "action")
+    elif target in ("FOLLOW_UP", "RESOLVED", "CLOSED") and row.created_by != ctx["sub"]:
+        notify(s, row.created_by, f"Escalation {target.lower()}", f"escalation:{row.id} — {getattr(body, 'reason', '') or getattr(body, 'feedback', '')}", severity="info")
+    return {"escalation": _escalation_payload(s, row), "decision": decision.as_dict()}
+
+
+@router.post("/escalations/{escalation_id}/submit")
+def submit_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    return _change_escalation(escalation_id, "SUBMITTED", "submit", body, ctx, s)
+
+
+@router.post("/escalations/{escalation_id}/receive")
+def receive_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") not in (1, 2, 4): raise HTTPException(403, "Only the configured receiving office may receive this escalation")
+    return _change_escalation(escalation_id, "RECEIVED", "receive", body, ctx, s)
+
+
+@router.post("/escalations/{escalation_id}/follow-up")
+def follow_up_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    return _change_escalation(escalation_id, "FOLLOW_UP", "follow_up", body, ctx, s)
+
+
+@router.post("/escalations/{escalation_id}/resolve")
+def resolve_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    return _change_escalation(escalation_id, "RESOLVED", "resolve", body, ctx, s)
+
+
+@router.post("/escalations/{escalation_id}/close")
+def close_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    return _change_escalation(escalation_id, "CLOSED", "close", body, ctx, s)
+
+
+def _report_scope_or_404(s, report_id, ctx):
+    campus = _phase5d_scope(s, ctx)
+    query = s.query(D.CampusReport).filter(D.CampusReport.id == report_id, D.CampusReport.tenant_id == ctx.get("tenant_id", TENANT))
+    if ctx.get("office_n") == 3: query = query.filter(D.CampusReport.campus_scope_id == campus.id)
+    row = query.first()
+    if not row: raise HTTPException(404, "Campus report not found")
+    return row, campus
+
+
+def _report_payload(row, snapshot=None):
+    return {"id": row.id, "tenant_id": row.tenant_id, "campus_scope_id": row.campus_scope_id, "created_by": row.created_by,
+            "owner_id": row.owner_id, "report_type": row.report_type, "period_start": row.period_start.isoformat(),
+            "period_end": row.period_end.isoformat(), "title": row.title, "status": row.status, "version": row.version,
+            "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None, "returned_at": row.returned_at.isoformat() if row.returned_at else None,
+            "approved_at": row.approved_at.isoformat() if row.approved_at else None, "vc_feedback": row.vc_feedback,
+            "workflow_id": row.workflow_id, "created_at": row.created_at.isoformat(), "updated_at": row.updated_at.isoformat(), "snapshot": snapshot}
+
+
+def _report_data_snapshot(s, campus, ctx):
+    risks = s.query(D.RiskRecord).filter(D.RiskRecord.tenant_id == ctx.get("tenant_id", TENANT), D.RiskRecord.campus_scope_id == campus.id).all()
+    actions = s.query(D.CorrectiveAction).join(D.RiskRecord, D.CorrectiveAction.risk_id == D.RiskRecord.id).filter(D.CorrectiveAction.tenant_id == ctx.get("tenant_id", TENANT), D.RiskRecord.campus_scope_id == campus.id).all()
+    escalations = s.query(D.EscalationRecord).filter(D.EscalationRecord.tenant_id == ctx.get("tenant_id", TENANT), D.EscalationRecord.campus_scope_id == campus.id).all()
+    now = datetime.utcnow().isoformat()
+    unavailable = {"status": "unavailable", "source_as_of": now, "notes": "No verified campus-scoped provider is available."}
+    return {"source_as_of": now, "sections": {
+        "risks": {"status": "available", "source_as_of": now, "items": [_risk_payload(s, r, ctx) for r in risks]},
+        "corrective_actions": {"status": "available", "source_as_of": now, "items": [_action_payload(s, a) for a in actions]},
+        "escalations": {"status": "available", "source_as_of": now, "items": [_escalation_payload(s, e) for e in escalations]},
+        "executive_summary": unavailable, "academic": unavailable, "students": unavailable, "attendance": unavailable,
+        "workforce": unavailable, "finance": unavailable, "infrastructure": unavailable, "placements": unavailable,
+        "approvals": unavailable, "kpis": unavailable, "bop_status": unavailable,
+        "requests_for_decision": {"status": "available", "source_as_of": now, "items": []},
+    }}
+
+
+def _report_snapshot(s, row):
+    return s.query(D.CampusReportSnapshot).filter(D.CampusReportSnapshot.report_id == row.id, D.CampusReportSnapshot.version == row.version).first()
+
+
+@router.get("/campus-reports")
+def list_campus_reports(ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "campus_reports", "view"); campus = _phase5d_scope(s, ctx)
+    query = s.query(D.CampusReport).filter(D.CampusReport.tenant_id == ctx.get("tenant_id", TENANT))
+    if ctx.get("office_n") == 3: query = query.filter(D.CampusReport.campus_scope_id == campus.id)
+    rows = query.order_by(desc(D.CampusReport.updated_at)).all()
+    return {"reports": [_report_payload(row) for row in rows], "total": len(rows)}
+
+
+@router.post("/campus-reports")
+def create_campus_report(body: ReportCreateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _phase5d_gate(s, ctx, "campus_reports", "create"); campus = _phase5d_scope(s, ctx)
+    if body.report_type not in REPORT_TYPES or body.period_end < body.period_start or not body.title.strip(): raise HTTPException(400, "Invalid report type, period, or title")
+    row = D.CampusReport(id=uid(), tenant_id=ctx.get("tenant_id", TENANT), campus_scope_id=campus.id, created_by=ctx["sub"], owner_id=ctx["sub"], report_type=body.report_type, period_start=body.period_start, period_end=body.period_end, title=body.title.strip(), status="DRAFT", version=1)
+    s.add(row); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.create", f"report:{row.id}", "", "DRAFT", row.title, ctx.get("auth_level", "mfa"))
+    return {"report": _report_payload(row), "decision": decision.as_dict()}
+
+
+@router.get("/campus-reports/{report_id}")
+def get_campus_report(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "campus_reports", "view"); row, _ = _report_scope_or_404(s, report_id, ctx); snapshot = _report_snapshot(s, row)
+    payload = json.loads(snapshot.snapshot_payload) if snapshot else None
+    return {"report": _report_payload(row, payload)}
+
+
+@router.patch("/campus-reports/{report_id}")
+def update_campus_report(report_id: str, body: ReportUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _phase5d_gate(s, ctx, "campus_reports", "edit"); row, _ = _report_scope_or_404(s, report_id, ctx)
+    if row.created_by != ctx["sub"] or row.status not in ("DRAFT", "RETURNED"): raise HTTPException(403, "Only draft or returned reports may be edited")
+    values = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict(exclude_unset=True)
+    for key, value in values.items(): setattr(row, key, value.strip() if isinstance(value, str) else value)
+    if row.period_end < row.period_start: raise HTTPException(400, "Report period is invalid")
+    row.updated_at = datetime.utcnow(); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.edit", f"report:{row.id}", row.status, row.status, row.title, ctx.get("auth_level", "mfa"))
+    return {"report": _report_payload(row), "decision": decision.as_dict()}
+
+
+def _submit_report(report_id, resubmit, ctx, s):
+    decision = _phase5d_gate(s, ctx, "campus_reports", "resubmit" if resubmit else "submit"); row, campus = _report_scope_or_404(s, report_id, ctx)
+    allowed = ("RETURNED",) if resubmit else ("DRAFT",)
+    if row.created_by != ctx["sub"] or row.status not in allowed: raise HTTPException(409, "Report is not eligible for submission")
+    row.version += 1 if resubmit else 0; row.status = "VC_REVIEW"; row.submitted_at = datetime.utcnow(); row.updated_at = row.submitted_at
+    snapshot = D.CampusReportSnapshot(id=uid(), report_id=row.id, version=row.version, snapshot_payload=json.dumps(_report_data_snapshot(s, campus, ctx), sort_keys=True), source_as_of=datetime.utcnow())
+    s.add(snapshot)
+    wf = WorkflowInstance(id=uid(), tenant_id=ctx.get("tenant_id", TENANT), process_key="campus_report_v1", label="Campus report", office_n=3, title=row.title, state="under_review", initiator_id=ctx["sub"], initiator_name=actor_name(s, ctx), current_stage=1, scope_level="campus", campus_scope_id=campus.id)
+    s.add(wf); row.workflow_id = wf.id; s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.resubmit" if resubmit else "report.submit", f"report:{row.id}", "RETURNED" if resubmit else "DRAFT", row.status, row.title, ctx.get("auth_level", "mfa"))
+    vc = s.query(User).filter(User.tenant_id == ctx.get("tenant_id", TENANT), User.office_n == 2, User.status == "active").first()
+    if vc: notify(s, vc.id, "Campus report submitted", f"report:{row.id} — {row.title}", severity="action")
+    return {"report": _report_payload(row, json.loads(snapshot.snapshot_payload)), "decision": decision.as_dict()}
+
+
+@router.post("/campus-reports/{report_id}/submit")
+def submit_campus_report(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    return _submit_report(report_id, False, ctx, s)
+
+
+@router.post("/campus-reports/{report_id}/resubmit")
+def resubmit_campus_report(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    return _submit_report(report_id, True, ctx, s)
+
+
+@router.get("/campus-reports/{report_id}/snapshot")
+def get_campus_report_snapshot(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "campus_reports", "view"); row, _ = _report_scope_or_404(s, report_id, ctx); snapshot = _report_snapshot(s, row)
+    if not snapshot: raise HTTPException(404, "Report snapshot not found")
+    return {"report_id": row.id, "version": snapshot.version, "snapshot": json.loads(snapshot.snapshot_payload), "source_as_of": snapshot.source_as_of.isoformat()}
+
+
+@router.get("/campus-reports/vc/inbox")
+def vc_campus_report_inbox(ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 2: raise HTTPException(403, "Only the Vice Chairman may review campus reports")
+    rows = s.query(D.CampusReport).filter(D.CampusReport.tenant_id == ctx.get("tenant_id", TENANT), D.CampusReport.status == "VC_REVIEW").order_by(desc(D.CampusReport.submitted_at)).all()
+    return {"reports": [_report_payload(row) for row in rows], "total": len(rows)}
+
+
+@router.post("/campus-reports/{report_id}/return")
+def return_campus_report(report_id: str, body: ReportFeedbackIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 2: raise HTTPException(403, "Only the Vice Chairman may return reports")
+    decision = _phase5d_gate(s, ctx, "campus_reports", "return")
+    if not body.feedback.strip(): raise HTTPException(400, "Feedback is required when returning a report")
+    row, _ = _report_scope_or_404(s, report_id, {**ctx, "office_n": 2, "scope_level": "university", "scope_ref": "scope_global"}); previous = row.status
+    if previous != "VC_REVIEW": raise HTTPException(409, "Report is not awaiting VC review")
+    row.status = "RETURNED"; row.returned_at = datetime.utcnow(); row.vc_feedback = body.feedback.strip(); row.updated_at = row.returned_at; s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.return", f"report:{row.id}", previous, row.status, body.feedback, ctx.get("auth_level", "mfa"))
+    notify(s, row.created_by, "Campus report returned", f"report:{row.id} — {body.feedback}", severity="action")
+    return {"report": _report_payload(row), "decision": decision.as_dict()}
+
+
+@router.post("/campus-reports/{report_id}/approve")
+def approve_campus_report(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 2: raise HTTPException(403, "Only the Vice Chairman may approve reports")
+    row, _ = _report_scope_or_404(s, report_id, {**ctx, "office_n": 2, "scope_level": "university", "scope_ref": "scope_global"}); previous = row.status
+    if previous != "VC_REVIEW": raise HTTPException(409, "Report is not awaiting VC review")
+    decision = authorize(ctx=ctx, action="approve", resource="campus_reports", rbac_authority=rbac_for(2, 2, "approve"), workflow_state=previous, workflow_valid_states=["VC_REVIEW"], target_scope_level="campus")
+    require(decision); row.status = "APPROVED"; row.approved_at = datetime.utcnow(); row.updated_at = row.approved_at; s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.approve", f"report:{row.id}", previous, row.status, row.title, ctx.get("auth_level", "mfa")); notify(s, row.created_by, "Campus report approved", f"report:{row.id} — {row.title}", severity="info")
+    return {"report": _report_payload(row), "decision": decision.as_dict()}
+
+
+# --------------------------------------------------------------------------- #
+#  CAMPUS RISK & ISSUES
+# --------------------------------------------------------------------------- #
+RISK_CATEGORIES = {
+    "Academic", "Student", "Faculty/Workforce", "Finance", "Infrastructure",
+    "Operations", "Compliance", "Safety", "Administration",
+}
+RISK_SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+RISK_LEVELS = {"LOW", "MEDIUM", "HIGH"}
+RISK_STATUSES = {"OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"}
+ACTION_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED", "VERIFIED"}
+RISK_TRANSITIONS = {
+    "OPEN": {"OPEN", "IN_PROGRESS", "RESOLVED"},
+    "IN_PROGRESS": {"IN_PROGRESS", "RESOLVED"},
+    "RESOLVED": {"RESOLVED", "CLOSED"},
+    "CLOSED": {"CLOSED"},
+}
+ACTION_TRANSITIONS = {
+    "OPEN": {"OPEN", "IN_PROGRESS", "COMPLETED"},
+    "IN_PROGRESS": {"IN_PROGRESS", "COMPLETED"},
+    "COMPLETED": {"COMPLETED", "VERIFIED"},
+    "VERIFIED": {"VERIFIED"},
+}
+
+
+def _risk_campus_scope(s, ctx):
+    if ctx.get("office_n") != 3 or ctx.get("scope_level") != "campus":
+        raise HTTPException(403, "Only a Campus Head may access campus risks")
+    tenant_id = ctx.get("tenant_id", TENANT)
+    scope_ref = (ctx.get("scope_ref") or "").strip()
+    query = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id,
+                                     OrgScope.level == "campus")
+    if scope_ref.startswith("scope_"):
+        scope = query.filter(OrgScope.id == scope_ref).first()
+    else:
+        scope = query.filter(OrgScope.name == scope_ref).first()
+    if not scope:
+        raise HTTPException(403, "A canonical campus scope is required")
+    return scope
+
+
+def _risk_gate(s, ctx, action):
+    _risk_campus_scope(s, ctx)
+    decision, _ = gate(s, ctx, "risks", action)
+    require(decision)
+    return decision
+
+
+def _risk_owner_for_scope(s, owner_id, campus_scope, tenant_id):
+    if not owner_id:
+        return None
+    owner = (s.query(User)
+             .filter(User.id == owner_id, User.tenant_id == tenant_id, User.status == "active")
+             .first())
+    if not owner or not scope_covers(owner.scope_level or "individual", "campus"):
+        raise HTTPException(400, "Owner is not authorized for this campus")
+    if owner.scope_level == "campus":
+        ref = (owner.scope_ref or "").strip()
+        owner_scope = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id,
+                                                OrgScope.level == "campus")
+        owner_scope = (owner_scope.filter(OrgScope.id == ref).first()
+                       if ref.startswith("scope_") else owner_scope.filter(OrgScope.name == ref).first())
+        if not owner_scope or owner_scope.id != campus_scope.id:
+            raise HTTPException(400, "Owner is outside the authorized campus")
+    return owner
+
+
+def _risk_owner_name(s, owner_id):
+    if not owner_id:
+        return "Unassigned"
+    owner = s.query(User).get(owner_id)
+    if not owner:
+        return "Unknown"
+    person = s.query(Person).get(owner.person_id)
+    return person.name if person else owner.username
+
+
+def _risk_overdue(row, now=None):
+    return bool(row.due_at and row.due_at < (now or datetime.utcnow()) and row.status != "CLOSED")
+
+
+def _risk_payload(s, row, ctx):
+    actions = []
+    if row.status in ("OPEN", "IN_PROGRESS"):
+        actions.extend(["edit", "assign", "resolve"])
+    elif row.status == "RESOLVED":
+        actions.append("close")
+    if row.status != "CLOSED" and row.severity in ("HIGH", "CRITICAL") and not row.escalated_at:
+        actions.append("escalate")
+    action_rows = s.query(D.CorrectiveAction).filter(
+        D.CorrectiveAction.tenant_id == ctx.get("tenant_id", TENANT),
+        D.CorrectiveAction.risk_id == row.id).order_by(D.CorrectiveAction.created_at).all()
+    return {
+        "id": row.id, "tenant_id": row.tenant_id, "campus_scope_id": row.campus_scope_id,
+        "created_by": row.created_by, "owner_id": row.owner_id,
+        "owner": _risk_owner_name(s, row.owner_id), "category": row.category,
+        "title": row.title, "description": row.description, "severity": row.severity,
+        "likelihood": row.likelihood, "impact": row.impact, "priority": row.priority,
+        "status": row.status, "source_type": row.source_type, "source_ref": row.source_ref,
+        "due_at": row.due_at.isoformat() if row.due_at else None,
+        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+        "closed_at": row.closed_at.isoformat() if row.closed_at else None,
+        "resolution_notes": row.resolution_notes, "escalated_at": row.escalated_at.isoformat() if row.escalated_at else None,
+        "escalation_destination": row.escalation_destination,
+        "escalation_reason": row.escalation_reason, "overdue": _risk_overdue(row),
+        "actions": [_action_payload(s, item) for item in action_rows],
+        "available_actions": actions,
+    }
+
+
+def _action_payload(s, row):
+    return {
+        "id": row.id, "risk_id": row.risk_id, "owner_id": row.owner_id,
+        "owner": _risk_owner_name(s, row.owner_id), "description": row.description,
+        "status": row.status, "progress": row.progress,
+        "due_at": row.due_at.isoformat() if row.due_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "verified_by": row.verified_by, "verified_at": row.verified_at.isoformat() if row.verified_at else None,
+        "completion_notes": row.completion_notes, "overdue": bool(row.due_at and row.due_at < datetime.utcnow() and row.status != "VERIFIED"),
+    }
+
+
+def _risk_or_404(s, risk_id, ctx):
+    campus = _risk_campus_scope(s, ctx)
+    row = (s.query(D.RiskRecord)
+           .filter(D.RiskRecord.id == risk_id,
+                   D.RiskRecord.tenant_id == ctx.get("tenant_id", TENANT),
+                   D.RiskRecord.campus_scope_id == campus.id).first())
+    if not row:
+        raise HTTPException(404, "Risk not found")
+    return row, campus
+
+
+def _risk_notify_owner(s, row, title, body):
+    if row.owner_id:
+        notify(s, row.owner_id, title, body, severity="action")
+
+
+class RiskCreateIn(BaseModel):
+    title: str
+    description: str = ""
+    category: str
+    severity: str
+    likelihood: str
+    impact: str
+    priority: str | None = None
+    owner_id: str | None = None
+    due_at: datetime | None = None
+    source_type: str = "manual"
+    source_ref: str = ""
+
+
+class RiskUpdateIn(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    category: str | None = None
+    severity: str | None = None
+    likelihood: str | None = None
+    impact: str | None = None
+    priority: str | None = None
+    due_at: datetime | None = None
+
+
+class RiskOwnerIn(BaseModel):
+    owner_id: str
+
+
+class RiskReasonIn(BaseModel):
+    reason: str = ""
+    resolution_notes: str = ""
+
+
+class ActionCreateIn(BaseModel):
+    description: str
+    owner_id: str
+    due_at: datetime | None = None
+
+
+class ActionUpdateIn(BaseModel):
+    description: str | None = None
+    owner_id: str | None = None
+    due_at: datetime | None = None
+    status: str | None = None
+    progress: int | None = None
+    completion_notes: str | None = None
+
+
+class ActionCompleteIn(BaseModel):
+    completion_notes: str = ""
+
+
+@router.get("/risks/owners")
+def risk_owners(ctx=Depends(auth), s=Depends(db)):
+    campus = _risk_campus_scope(s, ctx)
+    owners = []
+    for owner in s.query(User).filter(User.tenant_id == ctx.get("tenant_id", TENANT), User.status == "active").all():
+        try:
+            eligible = _risk_owner_for_scope(s, owner.id, campus, ctx.get("tenant_id", TENANT))
+        except HTTPException:
+            eligible = None
+        if eligible:
+            owners.append({"id": owner.id, "name": _risk_owner_name(s, owner.id), "office_n": owner.office_n, "role": owner.role})
+    return {"owners": owners}
+
+
+@router.get("/risks/summary")
+def risk_summary(ctx=Depends(auth), s=Depends(db)):
+    _risk_gate(s, ctx, "view")
+    campus = _risk_campus_scope(s, ctx)
+    rows = s.query(D.RiskRecord).filter(D.RiskRecord.tenant_id == ctx.get("tenant_id", TENANT), D.RiskRecord.campus_scope_id == campus.id).all()
+    actions = s.query(D.CorrectiveAction).join(D.RiskRecord, D.CorrectiveAction.risk_id == D.RiskRecord.id).filter(
+        D.CorrectiveAction.tenant_id == ctx.get("tenant_id", TENANT), D.RiskRecord.campus_scope_id == campus.id).all()
+    return {"summary": {
+        "open": sum(row.status in ("OPEN", "IN_PROGRESS") for row in rows),
+        "high_critical": sum(row.severity in ("HIGH", "CRITICAL") and row.status != "CLOSED" for row in rows),
+        "overdue_actions": sum(bool(action.due_at and action.due_at < datetime.utcnow() and action.status != "VERIFIED") for action in actions),
+        "escalated": sum(row.escalated_at is not None and row.status != "CLOSED" for row in rows),
+        "resolved": sum(row.status in ("RESOLVED", "CLOSED") for row in rows),
+    }, "campus_scope_id": campus.id}
+
+
+@router.get("/risks")
+def list_risks(status: str = "", severity: str = "", category: str = "", owner_id: str = "", ctx=Depends(auth), s=Depends(db)):
+    _risk_gate(s, ctx, "view")
+    campus = _risk_campus_scope(s, ctx)
+    query = s.query(D.RiskRecord).filter(D.RiskRecord.tenant_id == ctx.get("tenant_id", TENANT), D.RiskRecord.campus_scope_id == campus.id)
+    if status:
+        if status not in RISK_STATUSES:
+            raise HTTPException(400, "Unknown risk status")
+        query = query.filter(D.RiskRecord.status == status)
+    if severity:
+        if severity not in RISK_SEVERITIES:
+            raise HTTPException(400, "Unknown risk severity")
+        query = query.filter(D.RiskRecord.severity == severity)
+    if category:
+        if category not in RISK_CATEGORIES:
+            raise HTTPException(400, "Unknown risk category")
+        query = query.filter(D.RiskRecord.category == category)
+    if owner_id:
+        query = query.filter(D.RiskRecord.owner_id == owner_id)
+    rows = query.order_by(desc(D.RiskRecord.updated_at)).all()
+    return {"risks": [_risk_payload(s, row, ctx) for row in rows], "total": len(rows), "campus_scope_id": campus.id,
+            "categories": sorted(RISK_CATEGORIES), "severities": sorted(RISK_SEVERITIES)}
+
+
+@router.post("/risks")
+def create_risk(body: RiskCreateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "create")
+    campus = _risk_campus_scope(s, ctx)
+    if body.category not in RISK_CATEGORIES or body.severity not in RISK_SEVERITIES or body.likelihood not in RISK_LEVELS or body.impact not in RISK_LEVELS:
+        raise HTTPException(400, "Invalid risk category, severity, likelihood, or impact")
+    priority = body.priority or body.severity
+    if priority not in RISK_SEVERITIES:
+        raise HTTPException(400, "Invalid risk priority")
+    owner = _risk_owner_for_scope(s, body.owner_id, campus, ctx.get("tenant_id", TENANT))
+    risk_id = uid()
+    row = D.RiskRecord(id=risk_id, tenant_id=ctx.get("tenant_id", TENANT), campus_scope_id=campus.id,
+                       created_by=ctx["sub"], owner_id=owner.id if owner else None, category=body.category,
+                       title=body.title.strip(), description=body.description.strip(), severity=body.severity,
+                       likelihood=body.likelihood, impact=body.impact, priority=priority, status="OPEN",
+                       source_type=body.source_type, source_ref=body.source_ref, due_at=body.due_at)
+    if not row.title:
+        raise HTTPException(400, "Risk title is required")
+    s.add(row); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.create", f"risk:{risk_id}", "", "OPEN", row.title)
+    _risk_notify_owner(s, row, "Risk owner assignment", f"{row.title} — you are responsible for this campus risk.")
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+@router.get("/risks/{risk_id}")
+def get_risk(risk_id: str, ctx=Depends(auth), s=Depends(db)):
+    _risk_gate(s, ctx, "view")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    return {"risk": _risk_payload(s, row, ctx)}
+
+
+@router.patch("/risks/{risk_id}")
+@router.put("/risks/{risk_id}")
+def update_risk(risk_id: str, body: RiskUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "edit")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    if row.status == "CLOSED":
+        raise HTTPException(409, "Closed risks cannot be edited")
+    values = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict(exclude_unset=True)
+    for key, value in values.items():
+        if key == "category" and value not in RISK_CATEGORIES:
+            raise HTTPException(400, "Invalid risk category")
+        if key in ("severity", "priority") and value not in RISK_SEVERITIES:
+            raise HTTPException(400, "Invalid risk severity or priority")
+        if key in ("likelihood", "impact") and value not in RISK_LEVELS:
+            raise HTTPException(400, "Invalid likelihood or impact")
+        if key == "title" and not value.strip():
+            raise HTTPException(400, "Risk title is required")
+        setattr(row, key, value.strip() if isinstance(value, str) else value)
+    row.updated_at = datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.edit", f"risk:{row.id}", row.status, row.status, row.title)
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+@router.post("/risks/{risk_id}/assign")
+def assign_risk(risk_id: str, body: RiskOwnerIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "assign")
+    row, campus = _risk_or_404(s, risk_id, ctx)
+    if row.status == "CLOSED":
+        raise HTTPException(409, "Closed risks cannot be reassigned")
+    owner = _risk_owner_for_scope(s, body.owner_id, campus, ctx.get("tenant_id", TENANT))
+    row.owner_id = owner.id; row.updated_at = datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.assign", f"risk:{row.id}", "", owner.id, row.title)
+    _risk_notify_owner(s, row, "Risk owner assignment", f"{row.title} — you are now responsible for this campus risk.")
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+def _set_risk_status(row, status, reason, ctx, s, action):
+    if status not in RISK_TRANSITIONS[row.status]:
+        raise HTTPException(409, f"Cannot transition risk from {row.status} to {status}")
+    previous = row.status; row.status = status; row.updated_at = datetime.utcnow()
+    if status == "RESOLVED": row.resolved_at = row.updated_at
+    if status == "CLOSED": row.closed_at = row.updated_at
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.status_change", f"risk:{row.id}", previous, status, reason)
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], action, f"risk:{row.id}", previous, status, reason)
+
+
+@router.post("/risks/{risk_id}/resolve")
+def resolve_risk(risk_id: str, body: RiskReasonIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "resolve")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    _set_risk_status(row, "RESOLVED", body.resolution_notes or body.reason, ctx, s, "risk.resolve")
+    row.resolution_notes = body.resolution_notes or body.reason; s.commit()
+    _risk_notify_owner(s, row, "Risk resolved", f"{row.title} — risk resolved by Campus Head.")
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+@router.post("/risks/{risk_id}/close")
+def close_risk(risk_id: str, body: RiskReasonIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "close")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    actions = s.query(D.CorrectiveAction).filter(D.CorrectiveAction.risk_id == row.id).all()
+    if any(action.status != "VERIFIED" for action in actions):
+        raise HTTPException(409, "All corrective actions must be verified before closure")
+    _set_risk_status(row, "CLOSED", body.reason, ctx, s, "risk.close")
+    _risk_notify_owner(s, row, "Risk closed", f"{row.title} — risk closed by Campus Head.")
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+@router.post("/risks/{risk_id}/escalate")
+def escalate_risk(risk_id: str, body: RiskReasonIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "escalate")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    if row.status == "CLOSED":
+        raise HTTPException(409, "Closed risks cannot be escalated")
+    if row.severity not in RISK_ESCALATION_TARGETS and not _risk_overdue(row):
+        raise HTTPException(409, "Only high, critical, or overdue risks may be escalated")
+    office_n, destination = RISK_ESCALATION_TARGETS.get(row.severity, (2, "Vice Chairman"))
+    row.escalated_at = datetime.utcnow(); row.escalated_by = ctx["sub"]; row.escalation_destination = destination
+    row.escalation_reason = body.reason; row.updated_at = row.escalated_at; s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.escalate", f"risk:{row.id}", row.status, row.status, body.reason or destination)
+    target = s.query(User).filter(User.tenant_id == ctx.get("tenant_id", TENANT), User.office_n == office_n, User.status == "active").first()
+    if target:
+        notify(s, target.id, "Campus risk escalated", f"{row.title} — escalated by Campus Head to {destination}.", severity="critical")
+    return {"risk": _risk_payload(s, row, ctx), "destination": destination, "decision": decision.as_dict()}
+
+
+@router.get("/risks/{risk_id}/actions")
+def list_risk_actions(risk_id: str, ctx=Depends(auth), s=Depends(db)):
+    _risk_gate(s, ctx, "view")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    actions = s.query(D.CorrectiveAction).filter(D.CorrectiveAction.tenant_id == ctx.get("tenant_id", TENANT), D.CorrectiveAction.risk_id == row.id).all()
+    return {"actions": [_action_payload(s, action) for action in actions]}
+
+
+@router.post("/risks/{risk_id}/actions")
+def create_risk_action(risk_id: str, body: ActionCreateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "corrective_action")
+    row, campus = _risk_or_404(s, risk_id, ctx)
+    if row.status == "CLOSED":
+        raise HTTPException(409, "Closed risks cannot receive corrective actions")
+    if not body.description.strip():
+        raise HTTPException(400, "Corrective action description is required")
+    owner = _risk_owner_for_scope(s, body.owner_id, campus, ctx.get("tenant_id", TENANT))
+    action_id = uid()
+    action = D.CorrectiveAction(id=action_id, tenant_id=ctx.get("tenant_id", TENANT), risk_id=row.id,
+                                owner_id=owner.id, description=body.description.strip(), due_at=body.due_at)
+    s.add(action); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.corrective_action.create", f"risk-action:{action_id}", "", "OPEN", row.title)
+    notify(s, owner.id, "Corrective action assigned", f"{row.title} — {action.description}", severity="action")
+    return {"action": _action_payload(s, action), "decision": decision.as_dict()}
+
+
+def _risk_action_or_404(s, action_id, ctx):
+    _risk_gate(s, ctx, "view")
+    action = s.query(D.CorrectiveAction).filter(D.CorrectiveAction.id == action_id, D.CorrectiveAction.tenant_id == ctx.get("tenant_id", TENANT)).first()
+    if not action:
+        raise HTTPException(404, "Corrective action not found")
+    risk, campus = _risk_or_404(s, action.risk_id, ctx)
+    return action, risk, campus
+
+
+@router.patch("/risk-actions/{action_id}")
+@router.put("/risk-actions/{action_id}")
+def update_risk_action(action_id: str, body: ActionUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "corrective_update")
+    action, risk, campus = _risk_action_or_404(s, action_id, ctx)
+    values = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict(exclude_unset=True)
+    if "owner_id" in values:
+        owner = _risk_owner_for_scope(s, values["owner_id"], campus, ctx.get("tenant_id", TENANT)); values["owner_id"] = owner.id
+    if "status" in values:
+        if values["status"] not in ACTION_STATUSES or values["status"] not in ACTION_TRANSITIONS[action.status]:
+            raise HTTPException(409, f"Cannot transition action from {action.status} to {values['status']}")
+        if values["status"] == "COMPLETED": action.completed_at = datetime.utcnow()
+    if "progress" in values and not 0 <= values["progress"] <= 100:
+        raise HTTPException(400, "Progress must be between 0 and 100")
+    for key, value in values.items():
+        setattr(action, key, value.strip() if isinstance(value, str) else value)
+    action.updated_at = datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.corrective_action.update", f"risk-action:{action.id}", "", action.status, risk.title)
+    if action.owner_id:
+        notify(s, action.owner_id, "Corrective action updated", f"{risk.title} — {action.description}", severity="action")
+    return {"action": _action_payload(s, action), "decision": decision.as_dict()}
+
+
+@router.post("/risk-actions/{action_id}/complete")
+def complete_risk_action(action_id: str, body: ActionCompleteIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "corrective_update")
+    action, risk, _ = _risk_action_or_404(s, action_id, ctx)
+    if "COMPLETED" not in ACTION_TRANSITIONS[action.status]:
+        raise HTTPException(409, f"Cannot complete action from {action.status}")
+    action.status = "COMPLETED"; action.progress = 100; action.completed_at = datetime.utcnow(); action.completion_notes = body.completion_notes
+    action.updated_at = datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.corrective_action.update", f"risk-action:{action.id}", "", "COMPLETED", risk.title)
+    return {"action": _action_payload(s, action), "decision": decision.as_dict()}
+
+
+@router.post("/risk-actions/{action_id}/verify")
+def verify_risk_action(action_id: str, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "corrective_update")
+    action, risk, _ = _risk_action_or_404(s, action_id, ctx)
+    if "VERIFIED" not in ACTION_TRANSITIONS[action.status]:
+        raise HTTPException(409, f"Cannot verify action from {action.status}")
+    action.status = "VERIFIED"; action.verified_by = ctx["sub"]; action.verified_at = datetime.utcnow(); action.updated_at = action.verified_at
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.corrective_action.update", f"risk-action:{action.id}", "COMPLETED", "VERIFIED", risk.title)
+    return {"action": _action_payload(s, action), "decision": decision.as_dict()}
 
 
 # --------------------------------------------------------------------------- #

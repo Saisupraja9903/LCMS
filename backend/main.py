@@ -1130,13 +1130,13 @@ def _notify_stage(s, wf, proc):
     label = proc["chain"][stage]
     recipients = []
     recipient_office = proc["office_n"]
-    if wf.process_key == "branch_operational_plan" and "vice chairman" in label.lower():
+    if wf.process_key == "infrastructure_capex_v2" and wf.state == "escalated":
+        recipient_office = 1
+        label = "Chairman"
+    elif wf.process_key == "branch_operational_plan" and "vice chairman" in label.lower():
         recipient_office = 2
     elif wf.process_key == "infrastructure_capex_v2" and "campus head" in label.lower():
         recipient_office = 3
-    elif wf.process_key == "infrastructure_capex_v2" and wf.state == "escalated":
-        recipient_office = 1
-        label = "Chairman"
     owner = s.query(User).filter(User.office_n == recipient_office).first()
     if owner:
         recipients.append(owner)
@@ -1212,21 +1212,25 @@ def _campus_head_workflow_actions(s, wf, proc, ctx):
         return [], f"Decision unavailable at the current workflow stage. It is awaiting {stage_label or 'the configured approver'}."
     user = s.query(User).get(ctx["sub"])
     office_config = office(ctx["office_n"])
+    approval_limit = approval_limit_for(ctx.get("scope_level", "campus"), wf.process_key)
     actions = []
     escalation = None
     for action in ("review", "approve", "reject", "escalate"):
+        if action == "escalate" and wf.amount is not None and approval_limit is not None and wf.amount <= approval_limit:
+            continue
         rbac = rbac_for(ctx["office_n"], office_config["level"], action if action in VERBS else "approve")
         decision = authorize(
             ctx=ctx, action=action, resource=f"workflow:{wf.process_key}",
             rbac_authority=rbac, workflow_state=wf.state,
             workflow_valid_states=WF_VALID.get(action), amount=wf.amount,
-            approval_limit=approval_limit_for(ctx.get("scope_level", "campus"), wf.process_key),
+            approval_limit=approval_limit,
             requester_id=wf.initiator_id,
             active_delegation=active_delegations_for(s, user.id),
             target_scope_level=wf.scope_level, escalate_to=proc.get("escalation") if proc else None,
         )
         if decision.outcome == ALLOW:
-            actions.append(action)
+            if action not in actions:
+                actions.append(action)
         elif action == "approve" and decision.outcome in (ESCALATE, RECOMMEND_OUT):
             if "escalate" not in actions:
                 actions.append("escalate")
@@ -1538,6 +1542,12 @@ def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
                                 if wf.process_key == "branch_operational_plan"
                                 and wf.current_stage == 1
                                 and "vice chairman" in (_workflow_process(wf.process_key)["chain"][1]).lower()
+                                and in_authorized_scope(wf)
+                                and wf.id not in {row.id for row in own_rows})
+            if ctx["office_n"] == 3:
+                own_rows.extend(wf for wf in candidates
+                                if wf.process_key == "infrastructure_capex_v2"
+                                and wf.current_stage == 3
                                 and in_authorized_scope(wf)
                                 and wf.id not in {row.id for row in own_rows})
             delegated = active_delegations_for(s, ctx["sub"])

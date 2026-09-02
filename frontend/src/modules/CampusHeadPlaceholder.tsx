@@ -338,10 +338,6 @@ export function InfrastructureOverview() {
   )
 }
 
-export function KPIDashboard() {
-  return <CampusHeadDashboard user={{ office_n: 3, scope: 'Campus', office: 'Campus Head' }} go={() => {}} pageTitle="KPI Dashboard" />
-}
-
 export function CampusHeadApprovals() {
   const [workflows, setWorkflows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -457,6 +453,7 @@ function academicYearFromTerm(term: string) {
 
 export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (view: string) => void; pageTitle?: string }) {
   const [overview, setOverview] = useState<any>(null)
+  const [riskSummary, setRiskSummary] = useState<any>({})
   const [inbox, setInbox] = useState<any>({ workflows: [] })
   const [escalations, setEscalations] = useState<any>({ incoming: [], outgoing: [] })
   const [grievance, setGrievance] = useState<any>({ complaints: [] })
@@ -468,6 +465,7 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
   const [calendar, setCalendar] = useState<any>({})
   const [notifications, setNotifications] = useState<any[]>([])
   const [bop, setBop] = useState<any>({ plan: null })
+  const [reports, setReports] = useState<any[]>([])
 
   useEffect(() => {
     let active = true
@@ -476,6 +474,7 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
       api.workflows('inbox'),
       api.escalations(),
       api.grievance(),
+      api.riskSummary(),
       api.students('', '', 1, 25, {}),
       api.facultyStaff('', '', '', 1, {}),
       api.budget(),
@@ -484,12 +483,13 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
       api.academicCalendar(),
       api.notifications(),
       api.bop(),
-    ]).then(([overviewRes, inboxRes, escalationsRes, grievanceRes, studentsRes, facultyRes, budgetRes, invoicesRes, assetsRes, calendarRes, notificationsRes, bopRes]) => {
+    ]).then(([overviewRes, inboxRes, escalationsRes, grievanceRes, riskSummaryRes, studentsRes, facultyRes, budgetRes, invoicesRes, assetsRes, calendarRes, notificationsRes, bopRes]) => {
       if (!active) return
       setOverview(overviewRes)
       setInbox(inboxRes || { workflows: [] })
       setEscalations(escalationsRes || { incoming: [], outgoing: [] })
       setGrievance(grievanceRes || { complaints: [] })
+      setRiskSummary(riskSummaryRes?.summary || {})
       setStudents(studentsRes || { summary: {}, departments: [], students: [] })
       setFaculty(facultyRes || { summary: {}, staff: [] })
       setBudget(budgetRes || { budget: [] })
@@ -504,6 +504,7 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
         setInbox({ workflows: [] })
         setEscalations({ incoming: [], outgoing: [] })
         setGrievance({ complaints: [] })
+        setRiskSummary({})
         setStudents({ summary: {}, departments: [], students: [] })
         setFaculty({ summary: {}, staff: [] })
         setBudget({ budget: [] })
@@ -515,6 +516,10 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
       }
     })
     return () => { active = false }
+  }, [user?.office_n])
+
+  useEffect(() => {
+    api.campusReports().then((response: any) => setReports(response.reports || [])).catch(() => setReports([]))
   }, [user?.office_n])
 
   const deptRows = useMemo(() => {
@@ -555,13 +560,13 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
   const budgetTotal = (budget?.budget || []).reduce((sum: number, row: any) => sum + Number(row.allocated || 0), 0)
   const spentTotal = (budget?.budget || []).reduce((sum: number, row: any) => sum + Number(row.spent || 0), 0)
   const outstandingFees = Number(invoices?.summary?.outstanding || 0)
-  const riskStudents = Number(students?.summary?.at_risk || 0)
+  const riskCounts = riskSummary || {}
   const summaryCards = [
     { title: 'KPI Performance', value: '0', detail: 'No KPI data available', tone: 'green' },
     { title: 'Budget Utilization', value: budget?.budget?.length ? `${percent((spentTotal / (budgetTotal || 1)) * 100)}` : '0', detail: budget?.budget?.length ? `${currency(spentTotal)} used of ${currency(budgetTotal)}` : 'No budget data available', tone: 'amber' },
     { title: 'Pending Approvals', value: String(pendingApprovals.length), detail: pendingApprovals.length ? 'Items currently awaiting review' : 'No pending approvals available to this office', tone: 'red' },
-    { title: 'Risks & Issues', value: String(riskStudents), detail: riskStudents ? 'Current campus-level risk indicators' : 'No current risk/issue count available', tone: 'violet' },
-    { title: 'Escalations', value: String((escalations?.incoming || []).length + (escalations?.outgoing || []).length), detail: 'Open escalations', tone: 'crimson' },
+    { title: 'Risks & Issues', value: String(riskCounts.open || 0), detail: riskCounts.open ? 'Open campus risk records' : 'No open campus risks', tone: 'violet' },
+    { title: 'Escalations', value: String((escalations?.escalations || []).filter((item: any) => !['RESOLVED', 'CLOSED'].includes(item.status)).length), detail: 'Open campus escalations', tone: 'crimson' },
   ]
 
   return (
@@ -677,12 +682,11 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
         <Panel title="Risks & Issues">
           <div className="campus-head-risk-grid">
             {[
-              ['Critical', complaintCounts.critical || 0],
-              ['High', complaintCounts.high || 0],
-              ['Medium', complaintCounts.medium || 0],
-              ['Low', complaintCounts.low || 0],
-              ['Resolved', complaintCounts.resolved || 0],
-              ['Escalated', complaintCounts.escalated || 0],
+              ['Open', riskCounts.open || 0],
+              ['High / Critical', riskCounts.high_critical || 0],
+              ['Overdue actions', riskCounts.overdue_actions || 0],
+              ['Escalated', riskCounts.escalated || 0],
+              ['Resolved', riskCounts.resolved || 0],
             ].map(([label, value]) => (
               <div key={label} className="risk-item">
                 <label>{label}</label>
@@ -690,26 +694,26 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
               </div>
             ))}
           </div>
-          {!grievance?.complaints?.length && !students?.summary?.at_risk && <EmptyState text="No risk or issue data available yet" />}
+          {!riskCounts.open && !riskCounts.high_critical && !riskCounts.escalated && <EmptyState text="No campus risk data available yet" />}
         </Panel>
       </div>
 
       <div className="campus-head-grid campus-head-bottom-grid">
         <Panel title="Reporting to Vice Chairman">
           <div className="reporting-box">
-            <div><label>Last report</label><strong>No reports available yet</strong></div>
-            <div><label>Status</label><strong>Not available yet</strong></div>
-            <div><label>Next report</label><strong>Not available yet</strong></div>
-            <div><label>VC feedback</label><strong>No feedback available yet</strong></div>
+            <div><label>Last report</label><strong>{reports.length ? reports[0].title : 'No reports available yet'}</strong></div>
+            <div><label>Status</label><strong>{reports.length ? reports[0].status : 'Not available yet'}</strong></div>
+            <div><label>Reports awaiting VC</label><strong>{reports.filter((item: any) => item.status === 'VC_REVIEW').length}</strong></div>
+            <div><label>VC feedback</label><strong>{reports.find((item: any) => item.vc_feedback)?.vc_feedback || 'No feedback available yet'}</strong></div>
           </div>
         </Panel>
 
         <Panel title="Escalations">
           <div className="campus-head-risk-grid">
             {[
-              ['Pending', (escalations?.incoming || []).length || 0],
-              ['With Vice Chairman', (escalations?.outgoing || []).length || 0],
-              ['Resolved', 'Not available yet'],
+              ['Pending', (escalations?.escalations || []).filter((item: any) => ['SUBMITTED', 'RECEIVED', 'FOLLOW_UP'].includes(item.status)).length],
+              ['Overdue', (escalations?.escalations || []).filter((item: any) => item.overdue).length],
+              ['Resolved', (escalations?.escalations || []).filter((item: any) => item.status === 'RESOLVED' || item.status === 'CLOSED').length],
             ].map(([label, value]) => (
               <div key={label} className="risk-item">
                 <label>{label}</label>
@@ -717,7 +721,7 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
               </div>
             ))}
           </div>
-          {!escalations?.incoming?.length && !escalations?.outgoing?.length && <EmptyState text="No escalation data available yet" />}
+          {!escalations?.escalations?.length && <EmptyState text="No escalation data available yet" />}
         </Panel>
       </div>
 

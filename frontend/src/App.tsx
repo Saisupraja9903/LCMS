@@ -47,8 +47,11 @@ import ParentHome from './personas/ParentHome'
 import {
   CampusProfile, BranchOperationalPlan, DepartmentsPrograms, LeadershipTeam,
   AcademicSnapshot, StudentSnapshot, WorkforceOverview, InfrastructureOverview,
-  KPIDashboard, MyRequests, PolicyRepository, CampusHeadDashboard, CampusHeadApprovals
+  MyRequests, PolicyRepository, CampusHeadDashboard, CampusHeadApprovals
 } from './modules/CampusHeadPlaceholder'
+import RiskIssues from './modules/RiskIssues'
+import CampusEscalations from './modules/CampusEscalations'
+import CampusReports from './modules/CampusReports'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -107,7 +110,7 @@ const CAMPUS_HEAD_NAV = [
   ['PERFORMANCE', 'Workforce', 'workforce'],
   ['PERFORMANCE', 'Infrastructure', 'infrastructure'],
   ['PERFORMANCE', 'Placements', 'placements'],
-  ['PERFORMANCE', 'KPI Dashboard', 'kpi_dashboard'],
+  ['PERFORMANCE', 'Risk & Issues', 'risk_issues'],
   ['AUTHORITY', 'My Approvals', 'approvals'],
   ['AUTHORITY', 'Delegation', 'delegation'],
   ['AUTHORITY', 'My Requests', 'my_requests'],
@@ -457,7 +460,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'integrations':
       return <Integrations caps={caps} />
     case 'analytics':
-      return <Analytics user={user} />
+      return user.office_n === 3 ? <CampusReports /> : <Analytics user={user} />
     case 'students':
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
       return <Students caps={caps} />
@@ -528,7 +531,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'approval_history':
       return <ApprovalHistory />
     case 'escalations':
-      return <Escalations />
+      return user.office_n === 3 ? <CampusEscalations /> : <Escalations />
     case 'delegation':
       return user.office_n === 1 ? <ChairmanDelegation user={user} /> : <Delegations user={user} />
     case 'audit':
@@ -558,8 +561,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <WorkforceOverview />
     case 'infrastructure':
       return <InfrastructureOverview />
-    case 'kpi_dashboard':
-      return <KPIDashboard />
+    case 'risk_issues':
+      return <RiskIssues />
     case 'my_requests':
       return <MyRequests />
     case 'policy_repository':
@@ -634,8 +637,6 @@ function NavGlyph({ moduleKey, principal = false, campusHead = false }: { module
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="7" r="3.5" /><path d="M5 20a7 7 0 0 1 14 0" /></svg>
     case 'infrastructure':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m14 6 4-4 2 2-4 4" /><path d="m13 7-8.5 8.5a2.1 2.1 0 1 0 3 3L16 10" /><path d="m5 5 3 3M4 10l2-2" /></svg>
-    case 'kpi_dashboard':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /></svg>
     case 'my_requests':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h11M4 12h16M4 17h9" /><circle cx="18" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></svg>
     case 'policy_repository':

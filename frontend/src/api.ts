@@ -52,6 +52,26 @@ export const api = {
     req('/workflows/decide', { method: 'POST', body: JSON.stringify({ workflow_id, action, reason }) }),
   workflows: (scope = 'all') => req(`/workflows?scope=${scope}`),
   workflow: (id: string) => req(`/workflows/${id}`),
+  risks: (filters: Record<string, string> = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(filters).forEach(([key, value]) => { if (value) qs.set(key, value) })
+    const suffix = qs.toString()
+    return req(`/risks${suffix ? `?${suffix}` : ''}`)
+  },
+  risk: (id: string) => req(`/risks/${encodeURIComponent(id)}`),
+  riskSummary: () => req('/risks/summary'),
+  riskOwners: () => req('/risks/owners'),
+  createRisk: (body: any) => req('/risks', { method: 'POST', body: JSON.stringify(body) }),
+  updateRisk: (id: string, body: any) => req(`/risks/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  assignRisk: (id: string, owner_id: string) => req(`/risks/${encodeURIComponent(id)}/assign`, { method: 'POST', body: JSON.stringify({ owner_id }) }),
+  resolveRisk: (id: string, reason = '', resolution_notes = '') => req(`/risks/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify({ reason, resolution_notes }) }),
+  closeRisk: (id: string, reason = '') => req(`/risks/${encodeURIComponent(id)}/close`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  escalateRisk: (id: string, reason = '') => req(`/risks/${encodeURIComponent(id)}/escalate`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  riskActions: (id: string) => req(`/risks/${encodeURIComponent(id)}/actions`),
+  createRiskAction: (id: string, body: any) => req(`/risks/${encodeURIComponent(id)}/actions`, { method: 'POST', body: JSON.stringify(body) }),
+  updateRiskAction: (id: string, body: any) => req(`/risk-actions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  completeRiskAction: (id: string, completion_notes = '') => req(`/risk-actions/${encodeURIComponent(id)}/complete`, { method: 'POST', body: JSON.stringify({ completion_notes }) }),
+  verifyRiskAction: (id: string) => req(`/risk-actions/${encodeURIComponent(id)}/verify`, { method: 'POST' }),
   bop: () => req('/bop'),
   createBop: (body: any) => req('/bop', { method: 'POST', body: JSON.stringify(body) }),
   updateBop: (id: string, body: any) => req(`/bop/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
@@ -59,6 +79,22 @@ export const api = {
   resubmitBop: (id: string) => req(`/bop/${encodeURIComponent(id)}/resubmit`, { method: 'POST' }),
   approvalHistory: (filters: Record<string, string> = {}) => req(`/approval-history?${new URLSearchParams(filters).toString()}`),
   escalations: (filters: Record<string, string> = {}) => req(`/escalations?${new URLSearchParams(filters).toString()}`),
+  escalation: (id: string) => req(`/escalations/${encodeURIComponent(id)}`),
+  createEscalation: (body: any) => req('/escalations', { method: 'POST', body: JSON.stringify(body) }),
+  submitEscalation: (id: string, reason = '') => req(`/escalations/${encodeURIComponent(id)}/submit`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  followUpEscalation: (id: string, reason = '') => req(`/escalations/${encodeURIComponent(id)}/follow-up`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  receiveEscalation: (id: string, reason = '') => req(`/escalations/${encodeURIComponent(id)}/receive`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  resolveEscalation: (id: string, reason = '') => req(`/escalations/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  closeEscalation: (id: string, reason = '') => req(`/escalations/${encodeURIComponent(id)}/close`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  createCampusReport: (body: any) => req('/campus-reports', { method: 'POST', body: JSON.stringify(body) }),
+  campusReports: () => req('/campus-reports'),
+  campusReport: (id: string) => req(`/campus-reports/${encodeURIComponent(id)}`),
+  updateCampusReport: (id: string, body: any) => req(`/campus-reports/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  submitCampusReport: (id: string) => req(`/campus-reports/${encodeURIComponent(id)}/submit`, { method: 'POST' }),
+  resubmitCampusReport: (id: string) => req(`/campus-reports/${encodeURIComponent(id)}/resubmit`, { method: 'POST' }),
+  vcCampusReports: () => req('/campus-reports/vc/inbox'),
+  returnCampusReport: (id: string, feedback: string) => req(`/campus-reports/${encodeURIComponent(id)}/return`, { method: 'POST', body: JSON.stringify({ feedback }) }),
+  approveCampusReport: (id: string) => req(`/campus-reports/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
   chairmanApprovals: (params: Record<string, any> = {}) => {
     const qs = new URLSearchParams()
     Object.entries(params).forEach(([key, value]) => {

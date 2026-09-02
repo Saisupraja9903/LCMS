@@ -767,6 +767,123 @@ class Complaint(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class RiskRecord(Base):
+    __tablename__ = "risk_records"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=False)
+    created_by = Column(String, index=True)
+    owner_id = Column(String, index=True, nullable=True)
+    category = Column(String, index=True)
+    title = Column(String)
+    description = Column(Text, default="")
+    severity = Column(String, index=True)
+    likelihood = Column(String)
+    impact = Column(String)
+    priority = Column(String, index=True)
+    status = Column(String, index=True, default="OPEN")
+    source_type = Column(String, default="manual")
+    source_ref = Column(String, default="")
+    due_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    resolution_notes = Column(Text, default="")
+    escalated_at = Column(DateTime, nullable=True)
+    escalated_by = Column(String, nullable=True)
+    escalation_destination = Column(String, default="")
+    escalation_reason = Column(Text, default="")
+    escalation_workflow_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CorrectiveAction(Base):
+    __tablename__ = "corrective_actions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    risk_id = Column(String, ForeignKey("risk_records.id"), index=True, nullable=False)
+    owner_id = Column(String, index=True, nullable=False)
+    description = Column(Text, default="")
+    status = Column(String, index=True, default="OPEN")
+    progress = Column(Integer, default=0)
+    due_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    verified_by = Column(String, nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    completion_notes = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class EscalationRecord(Base):
+    __tablename__ = "escalation_records"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=False)
+    created_by = Column(String, index=True)
+    owner_id = Column(String, index=True, nullable=True)
+    source_type = Column(String, index=True)
+    source_ref = Column(String, index=True)
+    reason = Column(Text, default="")
+    priority = Column(String, index=True)
+    destination_office_n = Column(Integer, nullable=False)
+    destination_user_id = Column(String, nullable=True)
+    status = Column(String, index=True, default="DRAFT")
+    due_at = Column(DateTime, nullable=True)
+    received_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    resolution_notes = Column(Text, default="")
+    workflow_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class EscalationEvent(Base):
+    __tablename__ = "escalation_events"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    escalation_id = Column(String, ForeignKey("escalation_records.id"), index=True)
+    actor_id = Column(String)
+    event_type = Column(String)
+    reason = Column(Text, default="")
+    previous_status = Column(String, default="")
+    new_status = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CampusReport(Base):
+    __tablename__ = "campus_reports"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=False)
+    created_by = Column(String, index=True)
+    owner_id = Column(String, index=True, nullable=True)
+    report_type = Column(String, index=True)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    title = Column(String)
+    status = Column(String, index=True, default="DRAFT")
+    version = Column(Integer, default=1)
+    submitted_at = Column(DateTime, nullable=True)
+    returned_at = Column(DateTime, nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    vc_feedback = Column(Text, default="")
+    workflow_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CampusReportSnapshot(Base):
+    __tablename__ = "campus_report_snapshots"
+    id = Column(String, primary_key=True)
+    report_id = Column(String, ForeignKey("campus_reports.id"), index=True)
+    version = Column(Integer, nullable=False)
+    snapshot_payload = Column(Text, default="")
+    source_as_of = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class StudentIdentityCard(Base):
     __tablename__ = "student_identity_cards"
     id = Column(String, primary_key=True)
