@@ -54,7 +54,8 @@ def gate(s, ctx, module: str, action: str, amount=None):
             approval_limit = approval_limit_for(scope_level, proc)
     dec = authorize(ctx=ctx, action=verb, resource=module, rbac_authority=rbac,
                     amount=amount, approval_limit=approval_limit,
-                    active_delegation=active_delegation_for(s, ctx["sub"]),
+                    active_delegation=active_delegation_for(
+                        s, ctx["sub"], ctx.get("tenant_id", TENANT), ctx.get("scope_ref")),
                     target_scope_level=ctx.get("scope_level", "individual"),
                     escalate_to=escalate_to)
     return dec, verb
@@ -155,6 +156,30 @@ def workspace(ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @router.get("/overview")
 def overview(ctx=Depends(auth), s=Depends(db)):
+    # The generic overview predates the Campus Head portal. Campus Head must
+    # never receive tenant-wide aggregates as a campus dashboard.
+    if ctx.get("office_n") == 3:
+        require(gate(s, ctx, "analytics", "view")[0])
+        campus = _campus_scope_for_campus_head(s, ctx)
+        tenant_id = ctx.get("tenant_id", TENANT)
+        students = s.query(D.Student).filter(D.Student.tenant_id == tenant_id,
+                                             D.Student.campus == campus.name)
+        staff = s.query(D.StaffMember).filter(D.StaffMember.tenant_id == tenant_id,
+                                              D.StaffMember.campus == campus.name)
+        dept_counts = dict(s.query(D.Department.code, func.count(D.Student.id))
+                           .join(D.Student, D.Student.dept_id == D.Department.id)
+                           .filter(D.Student.tenant_id == tenant_id,
+                                   D.Student.campus == campus.name)
+                           .group_by(D.Department.code).all())
+        # No authoritative campus ownership exists for the remaining sources.
+        # `None` means unavailable; it must not be rendered as a real zero.
+        return {"stats": {"students": students.count(), "faculty": staff.count(),
+                "courses": None, "sections": None, "applications": None,
+                "fees_due": None, "books": None, "projects": None,
+                "open_complaints": None, "pending_leave": None,
+                "placement_offers": None}, "dept_distribution": dept_counts,
+                "campus_scope_id": campus.id, "data_status": "partial"}
+
     def c(model):
         return s.query(model).count()
     stats = {
@@ -677,6 +702,8 @@ class AcademicCalendarIn(BaseModel):
 @router.get("/calendar")
 def calendar_view(start: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "calendar", "view")[0])
+    campus = _campus_scope_for_campus_head(s, ctx) if ctx.get("office_n") == 3 else None
+    tenant_id = ctx.get("tenant_id", TENANT)
     month_start = _parse_month(start)
     month_end = _month_end(month_start)
     start_dt = datetime.combine(month_start, datetime.min.time())
@@ -685,11 +712,12 @@ def calendar_view(start: str = "", ctx=Depends(auth), s=Depends(db)):
 
     events = []
 
-    manual_rows = (s.query(D.CalendarEvent)
+    manual_query = (s.query(D.CalendarEvent)
                    .filter(D.CalendarEvent.status != "deleted",
                            D.CalendarEvent.start_at <= end_dt,
-                           func.coalesce(D.CalendarEvent.end_at, D.CalendarEvent.start_at) >= start_dt)
-                   .order_by(D.CalendarEvent.start_at, D.CalendarEvent.title).all())
+                           func.coalesce(D.CalendarEvent.end_at, D.CalendarEvent.start_at) >= start_dt,
+                           D.CalendarEvent.tenant_id == tenant_id))
+    manual_rows = [] if campus else manual_query.order_by(D.CalendarEvent.start_at, D.CalendarEvent.title).all()
     for row in manual_rows:
         if not _audience_visible(row.audience, viewer_tokens):
             continue
@@ -701,11 +729,14 @@ def calendar_view(start: str = "", ctx=Depends(auth), s=Depends(db)):
             editable=_calendar_event_editable(ctx, row), module_key="calendar"
         ))
 
-    academic_rows = (s.query(D.AcademicCalendarEntry)
+    academic_query = (s.query(D.AcademicCalendarEntry)
                      .filter(D.AcademicCalendarEntry.status != "deleted",
                              D.AcademicCalendarEntry.start_date <= month_end,
-                             func.coalesce(D.AcademicCalendarEntry.end_date, D.AcademicCalendarEntry.start_date) >= month_start)
-                     .order_by(D.AcademicCalendarEntry.start_date, D.AcademicCalendarEntry.title).all())
+                             func.coalesce(D.AcademicCalendarEntry.end_date, D.AcademicCalendarEntry.start_date) >= month_start,
+                             D.AcademicCalendarEntry.tenant_id == tenant_id))
+    if campus:
+        academic_query = academic_query.filter(D.AcademicCalendarEntry.campus.in_([campus.name, "All Campuses"]))
+    academic_rows = academic_query.order_by(D.AcademicCalendarEntry.start_date, D.AcademicCalendarEntry.title).all()
     for row in academic_rows:
         acad_start = datetime.combine(row.start_date, datetime.min.time())
         acad_end = datetime.combine(row.end_date or row.start_date, datetime.max.time())
@@ -716,9 +747,10 @@ def calendar_view(start: str = "", ctx=Depends(auth), s=Depends(db)):
             status=row.status, editable=False, module_key="academic_calendar"
         ))
 
-    drive_rows = (s.query(D.PlacementDrive)
+    drive_rows = ([] if campus else s.query(D.PlacementDrive)
                   .filter(D.PlacementDrive.date >= month_start,
-                          D.PlacementDrive.date <= month_end).all())
+                          D.PlacementDrive.date <= month_end,
+                          D.PlacementDrive.tenant_id == tenant_id).all())
     for row in drive_rows:
         drive_dt = datetime.combine(row.date, datetime.min.time())
         events.append(_event_payload(
@@ -948,13 +980,19 @@ def delete_calendar_event(event_id: str, ctx=Depends(auth), s=Depends(db)):
 @router.get("/academic-calendar")
 def academic_calendar(term: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academic_calendar", "view")[0])
-    term_rows = (s.query(D.AcademicCalendarEntry.term)
-                 .filter(D.AcademicCalendarEntry.status != "deleted")
+    campus = _campus_scope_for_campus_head(s, ctx) if ctx.get("office_n") == 3 else None
+    tenant_id = ctx.get("tenant_id", TENANT)
+    base_query = s.query(D.AcademicCalendarEntry).filter(
+        D.AcademicCalendarEntry.status != "deleted",
+        D.AcademicCalendarEntry.tenant_id == tenant_id)
+    if campus:
+        base_query = base_query.filter(D.AcademicCalendarEntry.campus.in_([campus.name, "All Campuses"]))
+    term_rows = (base_query.with_entities(D.AcademicCalendarEntry.term)
                  .distinct().order_by(D.AcademicCalendarEntry.term.desc()).all())
     term_options = [row[0] for row in term_rows]
     selected_term = term if term in term_options else (term_options[0] if term_options else "")
 
-    query = s.query(D.AcademicCalendarEntry).filter(D.AcademicCalendarEntry.status != "deleted")
+    query = base_query
     if selected_term:
         query = query.filter(D.AcademicCalendarEntry.term == selected_term)
     rows = query.order_by(D.AcademicCalendarEntry.start_date, D.AcademicCalendarEntry.title).all()
@@ -1141,6 +1179,46 @@ def _student_scope(s, query, ctx):
     if not scope.startswith("scope_"):
         return query.filter(D.Student.campus == scope)
     return query
+
+
+def _campus_scope_for_campus_head(s, ctx):
+    """Resolve Office #3 to one canonical tenant-local campus OrgScope.
+
+    Older Campus Head identities use the verified campus name as ``scope_ref``
+    (for example, ``Main Campus``).  That label is not itself authorization:
+    it must resolve to exactly one campus OrgScope in the authenticated tenant.
+    Canonical IDs continue to resolve directly.
+    """
+    if ctx.get("office_n") != 3 or ctx.get("scope_level") != "campus":
+        raise HTTPException(403, "A Campus Head campus scope is required")
+    tenant_id = ctx.get("tenant_id", TENANT)
+    scope_id = (ctx.get("scope_ref") or "").strip()
+    scopes = (s.query(OrgScope)
+              .filter(OrgScope.tenant_id == tenant_id, OrgScope.level == "campus")
+              .filter((OrgScope.id == scope_id) | (OrgScope.name == scope_id))
+              .limit(2).all())
+    if len(scopes) != 1:
+        raise HTTPException(403, "A canonical campus scope is required")
+    return scopes[0]
+
+
+def _validated_campus_scope_assignment(s, tenant_id, campus_scope_id):
+    """Validate an authoritative Asset/PlacementDrive ownership assignment.
+
+    Assignment is nullable for legacy records, but any non-null value must be a
+    campus OrgScope in the same tenant.  There are currently no asset or drive
+    write endpoints; this is the server-side validation boundary for any
+    future write path rather than accepting a browser-provided scope blindly.
+    """
+    if not campus_scope_id:
+        return None
+    scope = (s.query(OrgScope)
+             .filter(OrgScope.id == campus_scope_id, OrgScope.tenant_id == tenant_id,
+                     OrgScope.level == "campus")
+             .first())
+    if not scope:
+        raise HTTPException(422, "campus_scope_id must reference a campus in the authenticated tenant")
+    return scope
 
 
 def _academic_year_label(batch):
@@ -2443,8 +2521,16 @@ def decide_application(body: AdmissionDecisionIn, ctx=Depends(auth), s=Depends(d
 @router.get("/finance/invoices")
 def list_invoices(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
-    stu_map = {st.id: (st.roll_no, st.name) for st in s.query(D.Student).all()}
-    rows = s.query(D.FeeInvoice).limit(300).all()
+    tenant_id = ctx.get("tenant_id", TENANT)
+    invoice_query = s.query(D.FeeInvoice).filter(D.FeeInvoice.tenant_id == tenant_id)
+    student_query = s.query(D.Student).filter(D.Student.tenant_id == tenant_id)
+    if ctx.get("office_n") == 3:
+        campus = _campus_scope_for_campus_head(s, ctx)
+        student_query = student_query.filter(D.Student.campus == campus.name)
+        invoice_query = invoice_query.join(D.Student, D.FeeInvoice.student_id == D.Student.id).filter(
+            D.Student.tenant_id == tenant_id, D.Student.campus == campus.name)
+    stu_map = {st.id: (st.roll_no, st.name) for st in student_query.all()}
+    rows = invoice_query.limit(300).all()
     out = []
     for r in rows:
         roll, name = stu_map.get(r.student_id, ("", ""))
@@ -2452,9 +2538,9 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
                     "amount": r.amount, "paid": r.paid, "balance": r.amount - r.paid,
                     "status": r.status})
     summary = {
-        "total_billed": s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).scalar() or 0,
-        "total_collected": s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0,
-        "outstanding": s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).scalar() or 0,
+        "total_billed": invoice_query.with_entities(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).scalar() or 0,
+        "total_collected": invoice_query.with_entities(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0,
+        "outstanding": invoice_query.with_entities(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).scalar() or 0,
     }
     return {"invoices": out, "summary": summary,
             "can_record": can(s, ctx, "finance", "record_payment"),
@@ -2464,12 +2550,10 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
 @router.get("/finance/budget")
 def list_budget(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
-    query = s.query(D.BudgetLine)
+    query = s.query(D.BudgetLine).filter(D.BudgetLine.tenant_id == ctx.get("tenant_id", TENANT))
     if ctx.get("office_n") == 3 and ctx.get("scope_level") == "campus":
-        campus = (ctx.get("scope_ref") or "").strip()
-        if not campus or campus.startswith("scope_"):
-            raise HTTPException(403, "Your Campus Head account has no assigned campus scope")
-        query = query.filter(D.BudgetLine.campus == campus)
+        campus = _campus_scope_for_campus_head(s, ctx)
+        query = query.filter(D.BudgetLine.campus == campus.name)
     rows = query.all()
     return {"budget": [{"category": b.category, "allocated": b.allocated,
                         "spent": b.spent, "remaining": b.allocated - b.spent,
@@ -2640,7 +2724,11 @@ def list_jobs(ctx=Depends(auth), s=Depends(db)):
 @router.get("/faculty-staff")
 def faculty_staff(q: str = "", dept: str = "", kind: str = "", designation: str = "", status: str = "", page: int = Query(1, ge=1), page_size: int = Query(20, ge=10, le=100), ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hr", "view")[0])
-    query = s.query(D.StaffMember)
+    tenant_id = ctx.get("tenant_id", TENANT)
+    query = s.query(D.StaffMember).filter(D.StaffMember.tenant_id == tenant_id)
+    if ctx.get("office_n") == 3:
+        campus = _campus_scope_for_campus_head(s, ctx)
+        query = query.filter(D.StaffMember.campus == campus.name)
     if q:
         like = f"%{q}%"; query = query.filter((D.StaffMember.name.ilike(like)) | (D.StaffMember.emp_id.ilike(like)) | (D.StaffMember.email.ilike(like)))
     if dept:
@@ -2655,9 +2743,15 @@ def faculty_staff(q: str = "", dept: str = "", kind: str = "", designation: str 
     if status: query = query.filter(D.StaffMember.status == status)
     total = query.count(); rows = query.order_by(D.StaffMember.emp_id).offset((page - 1) * page_size).limit(page_size).all()
     departments = {row.id: row for row in s.query(D.Department).all()}
-    all_rows = s.query(D.StaffMember).all()
+    all_rows = query.all()
     teaching = sum(1 for row in all_rows if "professor" in (row.designation or "").lower())
-    return {"staff": [{"id": row.id, "employee_id": row.emp_id, "name": row.name, "email": row.email, "department": departments[row.dept_id].name if row.dept_id in departments else "Administration", "department_code": departments[row.dept_id].code if row.dept_id in departments else "", "designation": row.designation, "type": "Teaching" if "professor" in (row.designation or "").lower() else "Non-Teaching", "status": row.status, "campus": row.campus, "on_leave": row.id in on_leave_ids} for row in rows], "total": total, "page": page, "page_size": page_size, "total_pages": max(1, (total + page_size - 1) // page_size), "summary": {"total": len(all_rows), "teaching": teaching, "non_teaching": len(all_rows)-teaching, "on_leave": len(on_leave_ids), "vacancies": sum(job.openings for job in s.query(D.JobPosting).filter(D.JobPosting.status == "open").all())}, "departments": [{"code": d.code, "name": d.name} for d in departments.values() if s.query(D.StaffMember).filter(D.StaffMember.dept_id == d.id).count()], "designations": sorted(set(row.designation for row in all_rows if row.designation)), "statuses": sorted(set(row.status for row in all_rows if row.status))}
+    scoped_leave_ids = {row.id for row in all_rows if row.id in on_leave_ids}
+    scoped_dept_ids = {row.dept_id for row in all_rows if row.dept_id}
+    summary = {"total": len(all_rows), "teaching": teaching,
+               "non_teaching": len(all_rows) - teaching,
+               "on_leave": len(scoped_leave_ids),
+               "vacancies": None if ctx.get("office_n") == 3 else sum(job.openings for job in s.query(D.JobPosting).filter(D.JobPosting.status == "open").all())}
+    return {"staff": [{"id": row.id, "employee_id": row.emp_id, "name": row.name, "email": row.email, "department": departments[row.dept_id].name if row.dept_id in departments else "Administration", "department_code": departments[row.dept_id].code if row.dept_id in departments else "", "designation": row.designation, "type": "Teaching" if "professor" in (row.designation or "").lower() else "Non-Teaching", "status": row.status, "campus": row.campus, "on_leave": row.id in on_leave_ids} for row in rows], "total": total, "page": page, "page_size": page_size, "total_pages": max(1, (total + page_size - 1) // page_size), "summary": summary, "departments": [{"code": d.code, "name": d.name} for d in departments.values() if d.id in scoped_dept_ids], "designations": sorted(set(row.designation for row in all_rows if row.designation)), "statuses": sorted(set(row.status for row in all_rows if row.status))}
 
 
 @router.get("/faculty-staff/{staff_id}")
@@ -2708,7 +2802,14 @@ def decide_leave(body: LeaveDecisionIn, ctx=Depends(auth), s=Depends(db)):
 @router.get("/assets")
 def list_assets(q: str = "", category: str = "", status: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "assets", "view")[0])
-    query = s.query(D.Asset).filter(D.Asset.tenant_id == ctx.get("tenant_id", TENANT))
+    tenant_id = ctx.get("tenant_id", TENANT)
+    campus = None
+    if ctx.get("office_n") == 3:
+        campus = _campus_scope_for_campus_head(s, ctx)
+    scope_query = s.query(D.Asset).filter(D.Asset.tenant_id == tenant_id)
+    if campus:
+        scope_query = scope_query.filter(D.Asset.campus_scope_id == campus.id)
+    query = scope_query
     if q:
         like = f"%{q}%"
         query = query.filter((D.Asset.tag.ilike(like)) | (D.Asset.name.ilike(like)) | (D.Asset.location.ilike(like)))
@@ -2717,7 +2818,11 @@ def list_assets(q: str = "", category: str = "", status: str = "", ctx=Depends(a
     if status:
         query = query.filter(D.Asset.status == status)
     rows = query.order_by(D.Asset.tag).all()
-    all_rows = s.query(D.Asset).filter(D.Asset.tenant_id == ctx.get("tenant_id", TENANT)).all()
+    all_rows = scope_query.order_by(D.Asset.tag).all()
+    if campus and not all_rows:
+        return {"assets": [], "categories": [], "statuses": [], "category_summary": [],
+                "summary": {}, "can_add": False, "data_status": "unavailable",
+                "reason": "No campus-owned asset records are available."}
     assets = [{"id": a.id, "tag": a.tag, "name": a.name, "category": a.category,
                         "location": a.location, "status": a.status, "value": a.value}
                        for a in rows]
@@ -2728,7 +2833,9 @@ def list_assets(q: str = "", category: str = "", status: str = "", ctx=Depends(a
                                   "book_value": sum(a.value or 0 for a in all_rows if a.category == category_name)}
                                  for category_name in sorted({a.category for a in all_rows if a.category})],
             "summary": {"total": len(all_rows), "book_value": sum(a.value or 0 for a in all_rows), "in_service": sum(a.status == "in-service" for a in all_rows), "maintenance": sum(a.status == "maintenance" for a in all_rows)},
-            "can_add": can(s, ctx, "assets", "add")}
+            "can_add": can(s, ctx, "assets", "add"),
+            "campus_scope_id": campus.id if campus else None,
+            "data_status": "available"}
 
 
 @router.get("/procurement")
@@ -2776,7 +2883,7 @@ def approval_history(q: str = "", action: str = "", ctx=Depends(auth), s=Depends
 
 @router.get("/escalations")
 def escalations(q: str = "", state: str = "", ctx=Depends(auth), s=Depends(db)):
-    """Workflow-state escalation views; no redundant escalation table."""
+    """Workflow escalation views, plus Principal-visible campus risk escalations."""
     require(gate(s, ctx, "approvals", "view")[0])
     if ctx.get("office_n") == 3:
         return phase5d_escalations(status=state, ctx=ctx, s=s)
@@ -2794,7 +2901,43 @@ def escalations(q: str = "", state: str = "", ctx=Depends(auth), s=Depends(db)):
                 "title": workflow.title, "from": workflow.initiator_name,
                 "to": destinations.get(workflow.process_key, ""), "status": workflow.state,
                 "created_at": workflow.created_at.isoformat(), "updated_at": workflow.updated_at.isoformat()}
-    return {"incoming": [row(item) for item in workflows if "principal" in destinations.get(item.process_key, "").lower()],
+    incoming = [row(item) for item in workflows if "principal" in destinations.get(item.process_key, "").lower()]
+
+    # Campus risk escalations are persisted separately from workflow-state
+    # escalations.  A Principal must see only records explicitly routed to the
+    # Principal; this supplements the existing workflow list without changing
+    # its outgoing behaviour or any other office's visibility.
+    if ctx.get("office_n") == 4:
+        risk_query = s.query(D.EscalationRecord).filter(
+            D.EscalationRecord.tenant_id == ctx.get("tenant_id", TENANT),
+            D.EscalationRecord.destination_office_n == 4,
+        )
+        if state and state.upper() in ESCALATION_STATUSES:
+            risk_query = risk_query.filter(D.EscalationRecord.status == state.upper())
+        risk_rows = risk_query.order_by(desc(D.EscalationRecord.updated_at)).all()
+        for escalation in risk_rows:
+            risk = (s.query(D.RiskRecord)
+                    .filter(D.RiskRecord.id == escalation.source_ref,
+                            D.RiskRecord.tenant_id == escalation.tenant_id)
+                    .first()) if escalation.source_type == "risk" else None
+            initiator = actor_name(s, {"sub": escalation.created_by})
+            item = {
+                "id": escalation.id,
+                "reference": escalation.id,
+                "module": "Campus risk escalation",
+                "title": risk.title if risk else escalation.reason,
+                "from": initiator,
+                "to": office(escalation.destination_office_n).get("name", ""),
+                "status": escalation.status,
+                "created_at": escalation.created_at.isoformat(),
+                "updated_at": escalation.updated_at.isoformat(),
+            }
+            if not q or any(q.lower() in str(value).lower() for value in (
+                item["title"], item["from"], item["module"], escalation.reason,
+            )):
+                incoming.append(item)
+        incoming.sort(key=lambda item: item["updated_at"], reverse=True)
+    return {"incoming": incoming,
             "outgoing": [row(item) for item in workflows if item.id in outgoing_ids]}
 
 
@@ -2914,14 +3057,27 @@ def research(ctx=Depends(auth), s=Depends(db)):
 @router.get("/placements")
 def placements(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "placements", "view")[0])
-    rows = s.query(D.PlacementDrive).order_by(desc(D.PlacementDrive.ctc)).all()
-    placed = s.query(func.coalesce(func.sum(D.PlacementDrive.offers), 0)).scalar() or 0
+    tenant_id = ctx.get("tenant_id", TENANT)
+    campus = None
+    if ctx.get("office_n") == 3:
+        campus = _campus_scope_for_campus_head(s, ctx)
+    rows = s.query(D.PlacementDrive).filter(D.PlacementDrive.tenant_id == tenant_id)
+    if campus:
+        rows = rows.filter(D.PlacementDrive.campus_scope_id == campus.id)
+    rows = rows.order_by(desc(D.PlacementDrive.ctc)).all()
+    if campus and not rows:
+        return {"drives": [], "summary": {}, "can_add": False,
+                "data_status": "unavailable",
+                "reason": "No campus-owned placement drive records are available."}
+    placed = sum(d.offers or 0 for d in rows)
     top = max([r.ctc for r in rows], default=0)
     return {"drives": [{"id": d.id, "company": d.company, "role": d.role, "ctc": d.ctc,
                         "date": d.date.isoformat() if d.date else "", "eligible_cgpa": d.eligible_cgpa,
                         "status": d.status, "offers": d.offers} for d in rows],
             "summary": {"offers": placed, "top_ctc": top, "drives": len(rows)},
-            "can_add": can(s, ctx, "placements", "add_drive")}
+            "can_add": can(s, ctx, "placements", "add_drive"),
+            "campus_scope_id": campus.id if campus else None,
+            "data_status": "available"}
 
 
 # --------------------------------------------------------------------------- #
@@ -2930,6 +3086,12 @@ def placements(ctx=Depends(auth), s=Depends(db)):
 @router.get("/grievance")
 def grievance(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "grievance", "view")[0])
+    if ctx.get("office_n") == 3:
+        _campus_scope_for_campus_head(s, ctx)
+        # Complaints contain no campus or authoritative linked owner.
+        return {"complaints": [], "can_resolve": False, "can_raise": False,
+                "data_status": "unavailable",
+                "reason": "Campus ownership is not recorded for grievances."}
     rows = s.query(D.Complaint).order_by(desc(D.Complaint.created_at)).all()
     return {"complaints": [{"id": c.id, "kind": c.kind, "raised_by": c.raised_by,
                             "subject": c.subject, "status": c.status,
@@ -3178,7 +3340,11 @@ def _change_escalation(escalation_id, target, event_type, body, ctx, s):
     s.commit(); _escalation_event(s, row, ctx, event_type, previous, target, getattr(body, "reason", "") or getattr(body, "feedback", ""))
     if target == "SUBMITTED":
         recipients = [row.destination_user_id] if row.destination_user_id else []
-        recipients.extend(user.id for office_n in ([row.destination_office_n] + ([2] if row.priority == "CRITICAL" and row.destination_office_n == 1 else []))
+        additional_offices = []
+        if row.source_type == "risk":
+            _, _, additional_offices = _escalation_destination(
+                s, row.source_type, row.source_ref, row.priority, ctx)
+        recipients.extend(user.id for office_n in ([row.destination_office_n] + additional_offices)
                           for user in s.query(User).filter(User.tenant_id == row.tenant_id, User.office_n == office_n, User.status == "active").all())
         for recipient_id in set(recipients):
             notify(s, recipient_id, "Escalation received", f"escalation:{row.id} — {row.reason}", severity="critical" if row.priority == "CRITICAL" else "action")
@@ -3194,7 +3360,9 @@ def submit_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(aut
 
 @router.post("/escalations/{escalation_id}/receive")
 def receive_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
-    if ctx.get("office_n") not in (1, 2, 3, 4): raise HTTPException(403, "Only the configured receiving office may receive this escalation")
+    row = _escalation_or_404(s, escalation_id, ctx)
+    if ctx.get("office_n") != row.destination_office_n:
+        raise HTTPException(403, "Only the configured destination office may receive this escalation")
     return _change_escalation(escalation_id, "RECEIVED", "receive", body, ctx, s)
 
 

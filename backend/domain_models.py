@@ -692,6 +692,9 @@ class Asset(Base):
     __tablename__ = "assets"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
+    # Nullable until an authoritative business assignment is recorded.  The
+    # legacy free-text ``assets.campus`` column is deliberately not reused.
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=True)
     tag = Column(String)
     name = Column(String)
     category = Column(String, default="")
@@ -742,6 +745,8 @@ class PlacementDrive(Base):
     __tablename__ = "placement_drives"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
+    # A drive is campus-visible only after an authoritative OrgScope assignment.
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=True)
     company = Column(String)
     role = Column(String, default="")
     ctc = Column(Float, default=0)           # in LPA

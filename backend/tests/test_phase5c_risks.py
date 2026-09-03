@@ -31,7 +31,8 @@ class Phase5CRiskTests(unittest.TestCase):
         if self.risk_ids:
             self.session.query(D.CorrectiveAction).filter(D.CorrectiveAction.risk_id.in_(self.risk_ids)).delete(synchronize_session=False)
             self.session.query(D.RiskRecord).filter(D.RiskRecord.id.in_(self.risk_ids)).delete(synchronize_session=False)
-            self.session.query(AuditLog).filter(AuditLog.entity.in_([f"risk:{risk_id}" for risk_id in self.risk_ids] + [f"risk-action:{action_id}" for action_id in self.action_ids])).delete(synchronize_session=False)
+            # Audit rows are append-only: deleting test activity here would
+            # corrupt the tenant's hash chain for later audit verification.
             for title in self.risk_titles:
                 self.session.query(Notification).filter(Notification.body.like(f"%{title}%")).delete(synchronize_session=False)
         self.session.commit()

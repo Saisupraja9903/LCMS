@@ -19,6 +19,7 @@ import domain_models as D
 class Phase5DEscalationReportTests(unittest.TestCase):
     campus_ctx = {"sub": "user_3", "tenant_id": TENANT, "scope_level": "campus", "scope_ref": "scope_main_campus", "office_n": 3, "auth_level": "mfa"}
     vc_ctx = {"sub": "user_2", "tenant_id": TENANT, "scope_level": "university", "scope_ref": "scope_univ", "office_n": 2, "auth_level": "mfa"}
+    principal_ctx = {"sub": "user_4", "tenant_id": TENANT, "scope_level": "campus", "scope_ref": "scope_main_campus", "office_n": 4, "auth_level": "mfa"}
 
     def setUp(self):
         self.session = SessionLocal()
@@ -42,9 +43,8 @@ class Phase5DEscalationReportTests(unittest.TestCase):
         self.session.query(D.CorrectiveAction).filter(D.CorrectiveAction.id.in_(action_ids)).delete(synchronize_session=False)
         self.session.query(D.RiskRecord).filter(D.RiskRecord.id.in_(risk_ids)).delete(synchronize_session=False)
         self.session.query(WorkflowInstance).filter(WorkflowInstance.id.in_(workflow_ids)).delete(synchronize_session=False)
-        entities = [f"escalation:{item}" for item in escalation_ids] + [f"report:{item}" for item in report_ids]
-        if entities:
-            self.session.query(AuditLog).filter(AuditLog.entity.in_(entities)).delete(synchronize_session=False)
+        # Keep audit evidence append-only. Removing only selected events here
+        # breaks the tenant-wide audit hash chain.
         for marker in self.notification_markers:
             self.session.query(Notification).filter(Notification.body.like(f"%{marker}%")).delete(synchronize_session=False)
         self.session.commit()
@@ -72,17 +72,46 @@ class Phase5DEscalationReportTests(unittest.TestCase):
         self.assertEqual(created["destination_office_n"], 4)
         submitted = domain_api.submit_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Submitted"), ctx=self.campus_ctx, s=self.session)["escalation"]
         self.assertEqual(submitted["status"], "SUBMITTED")
-        received = domain_api.receive_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Received"), ctx={**self.vc_ctx, "scope_level": "university"}, s=self.session)["escalation"]
+        received = domain_api.receive_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Received"), ctx=self.principal_ctx, s=self.session)["escalation"]
         self.assertEqual(received["status"], "RECEIVED")
-        followed = domain_api.follow_up_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Follow-up"), ctx=self.vc_ctx, s=self.session)["escalation"]
+        followed = domain_api.follow_up_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Follow-up"), ctx=self.principal_ctx, s=self.session)["escalation"]
         self.assertEqual(followed["status"], "FOLLOW_UP")
-        resolved = domain_api.resolve_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Resolved"), ctx=self.vc_ctx, s=self.session)["escalation"]
+        resolved = domain_api.resolve_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Resolved"), ctx=self.principal_ctx, s=self.session)["escalation"]
         self.assertEqual(resolved["status"], "RESOLVED")
-        closed = domain_api.close_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Closed"), ctx=self.vc_ctx, s=self.session)["escalation"]
+        closed = domain_api.close_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Closed"), ctx=self.principal_ctx, s=self.session)["escalation"]
         self.assertEqual(closed["status"], "CLOSED")
         self.assertTrue(self.session.query(D.EscalationEvent).filter(D.EscalationEvent.escalation_id == created["id"]).count() >= 5)
         self.assertTrue(self.session.query(AuditLog).filter(AuditLog.entity == f"escalation:{created['id']}").count() >= 5)
         self.assertTrue(self.session.query(Notification).filter(Notification.body.like(f"%escalation:{created['id']}%")).count() >= 1)
+
+    def test_principal_inbox_includes_submitted_campus_risk_escalation(self):
+        risk = self.create_risk(title="Principal inbox risk", category="Student", severity="HIGH")
+        created = domain_api.create_escalation(
+            domain_api.EscalationCreateIn(
+                source_type="risk", source_ref=risk["id"],
+                reason="Student grievance backlog requires immediate institutional intervention.",
+                priority="HIGH", owner_id="user_4"),
+            ctx=self.campus_ctx, s=self.session)["escalation"]
+        self.escalation_ids.append(created["id"])
+        submitted = domain_api.submit_escalation(
+            created["id"], domain_api.Phase5DReasonIn(reason="Submitted"),
+            ctx=self.campus_ctx, s=self.session)["escalation"]
+        self.assertEqual(submitted["status"], "SUBMITTED")
+        self.assertTrue(self.session.query(Notification).filter(
+            Notification.user_id == "user_4",
+            Notification.body.like(f"%escalation:{created['id']}%")).count() >= 1)
+
+        principal_inbox = domain_api.escalations(ctx=self.principal_ctx, s=self.session)
+        principal_row = next(row for row in principal_inbox["incoming"] if row["id"] == created["id"])
+        self.assertEqual(principal_row["to"], "Principal")
+        self.assertEqual(principal_row["status"], "SUBMITTED")
+        self.assertEqual(principal_row["title"], risk["title"])
+        self.assertNotIn(created["id"], [row["id"] for row in principal_inbox["outgoing"]])
+
+        filtered = domain_api.escalations(state="SUBMITTED", ctx=self.principal_ctx, s=self.session)
+        self.assertIn(created["id"], [row["id"] for row in filtered["incoming"]])
+        unrelated_inbox = domain_api.escalations(ctx=self.vc_ctx, s=self.session)
+        self.assertNotIn(created["id"], [row["id"] for row in unrelated_inbox["incoming"]])
 
     def test_escalation_scope_and_destination_validation(self):
         risk = self.create_risk(category="Safety", severity="CRITICAL")
@@ -149,7 +178,7 @@ class Phase5DEscalationReportTests(unittest.TestCase):
 
         submitted = domain_api.submit_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Draft ready"), ctx=self.campus_ctx, s=self.session)["escalation"]
         self.assertEqual(submitted["status"], "SUBMITTED")
-        received = domain_api.receive_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Received"), ctx=self.campus_ctx, s=self.session)["escalation"]
+        received = domain_api.receive_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Received"), ctx=self.vc_ctx, s=self.session)["escalation"]
         self.assertEqual(received["status"], "RECEIVED")
 
     def test_report_cross_tenant_access_is_rejected(self):

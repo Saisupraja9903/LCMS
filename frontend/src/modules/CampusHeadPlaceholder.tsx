@@ -320,6 +320,7 @@ export function InfrastructureOverview() {
   }, [])
 
   const summary = assets.summary || {}
+  const unavailable = assets.data_status === 'unavailable'
   return (
     <div className="fade-in campus-head-page">
       <div className="page-head">
@@ -327,12 +328,13 @@ export function InfrastructureOverview() {
         <p>Campus asset and infrastructure status based on currently available asset inventory.</p>
       </div>
       <div className="campus-head-panel">
-        <div className="campus-head-metrics">
+        {unavailable ? <EmptyState text={assets.reason || 'Campus-scoped infrastructure data is unavailable.'} /> : <div className="campus-head-metrics">
           <div className="campus-head-metric"><label>Total tracked assets</label><strong>{n(summary.total, 'Not available yet')}</strong></div>
           <div className="campus-head-metric"><label>Book value</label><strong>{currency(summary.book_value)}</strong></div>
           <div className="campus-head-metric"><label>In service</label><strong>{n(summary.in_service, 'Not available yet')}</strong></div>
           <div className="campus-head-metric"><label>Needs attention</label><strong>{n(summary.maintenance, 'Not available yet')}</strong></div>
-        </div>
+        </div>}
+        {!unavailable && assets.assets?.length ? <div className="tbl-scroll" style={{ marginTop: 18 }}><table className="tbl"><thead><tr><th>Asset</th><th>Category</th><th>Location</th><th>Status</th><th>Value</th></tr></thead><tbody>{assets.assets.map((asset: any) => <tr key={asset.id}><td><b>{asset.name}</b><br /><small className="mono">{asset.tag}</small></td><td>{asset.category}</td><td>{asset.location}</td><td>{asset.status}</td><td>{currency(asset.value)}</td></tr>)}</tbody></table></div> : null}
       </div>
     </div>
   )

@@ -11,9 +11,10 @@ from datetime import date, datetime, timedelta
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
                       slug, ensure_additive_schema)
 from matrices import APPROVAL_MATRIX
-from models import (Base, User, Delegation, DelegationPolicy, DelegationProfile,
+from models import (Base, User, OrgScope, Delegation, DelegationPolicy, DelegationProfile,
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
                     DelegationOption, DelegationContext)
+from core import write_audit
 import domain_models as D
 
 R = random.Random(42)
@@ -446,6 +447,40 @@ def _ensure(s, model, pk, factory):
         row = factory()
         s.add(row)
     return row
+
+
+def _seed_phase6b_campus_data(s):
+    """Idempotent, source-backed Main Campus demo records with canonical ownership."""
+    campus = (s.query(OrgScope).filter(OrgScope.id == "scope_main_campus",
+              OrgScope.tenant_id == TENANT, OrgScope.level == "campus").first())
+    if not campus:
+        return
+    asset_specs = [
+        ("p6b_asset_main_lab_server", "P6B-MAIN-SRV-01", "Main Campus Lab Virtualization Server", "IT Hardware", "Engineering Lab Block", "in-service", 485000),
+        ("p6b_asset_main_library_hvac", "P6B-MAIN-HVAC-01", "Main Campus Library HVAC Unit", "Facilities", "Central Library", "maintenance", 320000),
+    ]
+    drive_specs = [
+        ("p6b_drive_main_techworks", "TechWorks India", "Graduate Software Engineer", 8.4, date(2026, 9, 18), 7.0, "scheduled", 6),
+        ("p6b_drive_main_greenline", "Greenline Systems", "Operations Analyst", 6.8, date(2026, 9, 25), 6.5, "scheduled", 4),
+    ]
+    for record_id, tag, name, category, location, status, value in asset_specs:
+        if s.get(D.Asset, record_id) is None:
+            s.add(D.Asset(id=record_id, tenant_id=TENANT, campus_scope_id=campus.id,
+                          tag=tag, name=name, category=category, location=location,
+                          status=status, value=value))
+            s.commit()
+            write_audit(s, "system_seed", "System seed", 28, "asset.create", f"asset:{record_id}",
+                        "", status, "Controlled Phase 6B Main Campus asset provisioned", tenant_id=TENANT,
+                        campus_scope_id=campus.id)
+    for record_id, company, role, ctc, drive_date, cgpa, status, offers in drive_specs:
+        if s.get(D.PlacementDrive, record_id) is None:
+            s.add(D.PlacementDrive(id=record_id, tenant_id=TENANT, campus_scope_id=campus.id,
+                                   company=company, role=role, ctc=ctc, date=drive_date,
+                                   eligible_cgpa=cgpa, status=status, offers=offers))
+            s.commit()
+            write_audit(s, "system_seed", "System seed", 28, "placement_drive.create", f"placement_drive:{record_id}",
+                        "", status, "Controlled Phase 6B Main Campus placement drive provisioned", tenant_id=TENANT,
+                        campus_scope_id=campus.id)
 
 
 def _program_prefix(name):
@@ -3322,6 +3357,7 @@ def seed_domain():
         _seed_principal_schedule_events(s)
         _seed_development_backlog_history(s)
         _seed_development_principal_coverage(s)
+        _seed_phase6b_campus_data(s)
         return {
             "status": "domain-seeded",
             "schools": s.query(D.School).count(),

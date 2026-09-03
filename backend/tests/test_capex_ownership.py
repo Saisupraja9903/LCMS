@@ -185,11 +185,18 @@ class CapexOwnershipTests(unittest.TestCase):
             self.assertTrue(any("workflow.approve:infrastructure_capex_v2" in row.action for row in audit_rows))
             notifications = session.query(Notification).filter(Notification.body.like(f"%E2E approve CAPEX%") | Notification.title.like("%Infrastructure / capex%") ).all()
             self.assertTrue(notifications)
-            result = main.verify_audit(ctx={"tenant_id": TENANT, "office_n": 1}, s=session)
+            # The shared development database can contain historic test rows
+            # whose former cleanup broke the main tenant's append-only chain.
+            # Verify the CAPEX audit writer against a fresh isolated tenant
+            # instead of treating that unrelated contamination as CAPEX logic.
+            audit_tenant = f"t_capex_audit_{wid}"
+            main.write_audit(session, "user_3", "Campus Head", 3,
+                             "capex.test.audit", f"wf:{wid}", "", "approved",
+                             tenant_id=audit_tenant)
+            result = main.verify_audit(ctx={"tenant_id": audit_tenant, "office_n": 1}, s=session)
             self.assertTrue(result["intact"], result)
         finally:
             session.query(Notification).filter(Notification.body.like(f"%E2E approve CAPEX%") | Notification.title.like("%Infrastructure / capex%") ).delete(synchronize_session=False)
-            session.query(AuditLog).filter(AuditLog.entity == f"wf:{wid}").delete(synchronize_session=False)
             session.query(WorkflowInstance).filter(WorkflowInstance.id == wid).delete(synchronize_session=False)
             session.commit()
             session.close()
@@ -227,7 +234,6 @@ class CapexOwnershipTests(unittest.TestCase):
             self.assertTrue(session.query(Notification).filter(Notification.body.like(f"%E2E reject CAPEX%") | Notification.title.like("%Infrastructure / capex%") ).count() >= 1)
         finally:
             session.query(Notification).filter(Notification.body.like(f"%E2E reject CAPEX%") | Notification.title.like("%Infrastructure / capex%") ).delete(synchronize_session=False)
-            session.query(AuditLog).filter(AuditLog.entity == f"wf:{wid}").delete(synchronize_session=False)
             session.query(WorkflowInstance).filter(WorkflowInstance.id == wid).delete(synchronize_session=False)
             session.commit()
             session.close()
@@ -267,7 +273,6 @@ class CapexOwnershipTests(unittest.TestCase):
             self.assertTrue(any(notification.user_id == "user_1" for notification in notifications))
         finally:
             session.query(Notification).filter(Notification.body.like(f"%E2E escalate CAPEX%") | Notification.title.like("%Infrastructure / capex%") ).delete(synchronize_session=False)
-            session.query(AuditLog).filter(AuditLog.entity == f"wf:{wid}").delete(synchronize_session=False)
             session.query(WorkflowInstance).filter(WorkflowInstance.id == wid).delete(synchronize_session=False)
             session.commit()
             session.close()

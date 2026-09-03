@@ -104,6 +104,15 @@ def ensure_additive_schema():
         "workflow_instances": [
             ("campus_scope_id", "VARCHAR"),
         ],
+        "assets": [
+            ("campus_scope_id", "VARCHAR"),
+        ],
+        "placement_drives": [
+            ("campus_scope_id", "VARCHAR"),
+        ],
+        "audit_logs": [
+            ("campus_scope_id", "VARCHAR"),
+        ],
     }
 
     with engine.begin() as conn:
@@ -123,6 +132,24 @@ def ensure_additive_schema():
             foreign_keys = {fk.get("name") for fk in inspect(conn).get_foreign_keys("workflow_instances")}
             if conn.dialect.name == "postgresql" and "fk_workflow_instances_campus_scope" not in foreign_keys:
                 conn.execute(text("ALTER TABLE workflow_instances ADD CONSTRAINT fk_workflow_instances_campus_scope FOREIGN KEY (campus_scope_id) REFERENCES org_scopes (id)"))
+        # Phase 6A: canonical ownership for infrastructure and placements.
+        # Existing rows stay NULL: no legacy text or descriptive value is used
+        # as evidence of campus ownership.
+        if inspector.has_table("org_scopes"):
+            for table_name, constraint_name in (
+                ("assets", "fk_assets_campus_scope"),
+                ("placement_drives", "fk_placement_drives_campus_scope"),
+                ("audit_logs", "fk_audit_logs_campus_scope"),
+            ):
+                if not inspector.has_table(table_name):
+                    continue
+                index_name = f"ix_{table_name}_campus_scope_id"
+                indexes = {index["name"] for index in inspect(conn).get_indexes(table_name)}
+                if index_name not in indexes:
+                    conn.execute(text(f"CREATE INDEX {index_name} ON {table_name} (campus_scope_id)"))
+                foreign_keys = {fk.get("name") for fk in inspect(conn).get_foreign_keys(table_name)}
+                if conn.dialect.name == "postgresql" and constraint_name not in foreign_keys:
+                    conn.execute(text(f"ALTER TABLE {table_name} ADD CONSTRAINT {constraint_name} FOREIGN KEY (campus_scope_id) REFERENCES org_scopes (id)"))
         # Older hostel rows pre-date campus ownership.  Room inventory in the
         # original seed belongs to Main Campus; allocation rows can only be
         # backfilled when they are linked to an actual student record.

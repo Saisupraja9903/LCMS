@@ -29,24 +29,25 @@ export default function Finance({ caps, readOnly = false }: { caps: any; readOnl
 
   if (!data) return <Spinner />
   const sm = data.summary
+  const feesUnavailable = data.data_status === 'unavailable'
 
   return (
     <div className="fade-in">
       <PageHead title="Finance" sub="Fee collection, waivers (with limit-based escalation), and budget oversight" />
 
-      <div className="kpi-row" style={{ marginBottom: 20 }}>
+      {feesUnavailable ? <div className="empty">{data.reason || 'Campus-scoped invoice data is unavailable.'}</div> : <div className="kpi-row" style={{ marginBottom: 20 }}>
         <div className="kpi"><div className="kpi-v">{money(sm.total_billed)}</div><div className="kpi-l">Total billed</div></div>
         <div className="kpi"><div className="kpi-v" style={{ color: 'var(--teal)' }}>{money(sm.total_collected)}</div><div className="kpi-l">Collected</div></div>
         <div className="kpi"><div className="kpi-v" style={{ color: 'var(--rose)' }}>{money(sm.outstanding)}</div><div className="kpi-l">Outstanding</div></div>
         <div className="kpi"><div className="kpi-v">{Math.round(100 * sm.total_collected / (sm.total_billed || 1))}%</div><div className="kpi-l">Collection rate</div></div>
-      </div>
+      </div>}
 
       <div className="tabs">
         <button className={`tab ${tab === 'fees' ? 'on' : ''}`} onClick={() => setTab('fees')}>Fee invoices</button>
         <button className={`tab ${tab === 'budget' ? 'on' : ''}`} onClick={() => setTab('budget')}>Budget</button>
       </div>
 
-      {tab === 'fees' && (
+      {tab === 'fees' && !feesUnavailable && (
         <div className="card">
           <div className="tbl-scroll">
             <table className="tbl">

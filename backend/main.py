@@ -93,12 +93,15 @@ def uid() -> str:
 #  Audit (hash-chained, append-only)                                          #
 # --------------------------------------------------------------------------- #
 def write_audit(s, actor, actor_name, office_n, action, entity,
-                prev_state="", new_state="", reason="", auth_level="mfa"):
-    last = s.query(AuditLog).order_by(desc(AuditLog.id)).first()
+                prev_state="", new_state="", reason="", auth_level="mfa",
+                tenant_id=None, campus_scope_id=None):
+    tenant = tenant_id or TENANT
+    last = (s.query(AuditLog).filter(AuditLog.tenant_id == tenant)
+            .order_by(desc(AuditLog.id)).first())
     prev = last.hash if last else "0" * 64
     rec = {"actor": actor, "action": action, "entity": entity, "new_state": new_state}
     h = audit_hash(prev, rec)
-    row = AuditLog(tenant_id=TENANT, actor=actor, actor_name=actor_name, office_n=office_n,
+    row = AuditLog(tenant_id=tenant, campus_scope_id=campus_scope_id, actor=actor, actor_name=actor_name, office_n=office_n,
                    action=action, entity=entity, prev_state=prev_state, new_state=new_state,
                    reason=reason, auth_level=auth_level, prev_hash=prev, hash=h)
     s.add(row)
@@ -106,8 +109,8 @@ def write_audit(s, actor, actor_name, office_n, action, entity,
     return row
 
 
-def notify(s, user_id, title, body, severity="info"):
-    s.add(Notification(id=uid(), tenant_id=TENANT, user_id=user_id, severity=severity,
+def notify(s, user_id, title, body, severity="info", tenant_id=None):
+    s.add(Notification(id=uid(), tenant_id=tenant_id or TENANT, user_id=user_id, severity=severity,
                        title=title, body=body))
     s.commit()
 
@@ -1792,18 +1795,43 @@ class DelegateIn(BaseModel):
     reason: str = ""
 
 
+GENERIC_DELEGATION_AUTHORITIES = {"approve", "review"}
+MAX_GENERIC_DELEGATION_DAYS = 90
+
+
 @app.post("/api/delegations")
 def create_delegation(body: DelegateIn, ctx=Depends(auth), s=Depends(db)):
     o = office(ctx["office_n"])
     can = rbac_for(ctx["office_n"], o["level"], "delegate")
     if can in (A.NOT_ALLOWED,):
         raise HTTPException(403, "This office cannot delegate authority")
-    target = s.query(User).filter(User.username == body.to_username).first()
+    tenant_id = ctx.get("tenant_id", TENANT)
+    target = (s.query(User)
+              .filter(User.username == body.to_username, User.tenant_id == tenant_id,
+                      User.status == "active")
+              .first())
     if not target:
         raise HTTPException(404, "Target user not found")
+    if body.authority not in GENERIC_DELEGATION_AUTHORITIES:
+        raise HTTPException(400, "Delegation authority must be approve or review")
+    if not 1 <= body.days <= MAX_GENERIC_DELEGATION_DAYS:
+        raise HTTPException(400, f"Delegation duration must be 1-{MAX_GENERIC_DELEGATION_DAYS} days")
+    if ctx.get("office_n") == 3 and (ctx.get("scope_level") != "campus" or target.scope_level != "campus" or target.scope_ref != ctx.get("scope_ref")):
+        raise HTTPException(403, "Campus Head delegations must remain within the assigned campus")
+    grantor_authority = rbac_for(ctx["office_n"], o["level"], body.authority)
+    target_office = office(target.office_n)
+    target_authority = rbac_for(target.office_n, target_office["level"], body.authority)
+    if grantor_authority in (A.NOT_ALLOWED,) or target_authority in (A.NOT_ALLOWED,):
+        raise HTTPException(403, "Delegation authority is not compatible with the grantor or delegatee")
+    if body.limit is not None and body.limit <= 0:
+        raise HTTPException(400, "Delegation monetary limit must be positive")
+    if body.authority == "approve":
+        campus_limit = max(APPROVAL_LIMITS.get("campus", {}).values(), default=0)
+        if body.limit is None or body.limit > campus_limit:
+            raise HTTPException(400, "Approval delegation requires a permitted monetary limit")
     u = s.query(User).get(ctx["sub"])
     p = s.query(Person).get(u.person_id)
-    d = Delegation(id=uid(), tenant_id=TENANT, from_user=u.id, to_user=target.id,
+    d = Delegation(id=uid(), tenant_id=tenant_id, from_user=u.id, to_user=target.id,
                    authority=body.authority, scope_ref=ctx.get("scope_ref", "scope_global"),
                    limit=body.limit, start=datetime.utcnow(),
                    end=datetime.utcnow() + timedelta(days=body.days),
@@ -1812,23 +1840,25 @@ def create_delegation(body: DelegateIn, ctx=Depends(auth), s=Depends(db)):
     s.commit()
     write_audit(s, u.id, p.name if p else u.username, ctx["office_n"],
                 "delegation.create", f"deleg:{d.id}", "", "active",
-                f"Delegated {body.authority} to {body.to_username} for {body.days}d")
+                f"Delegated {body.authority} to {body.to_username} for {body.days}d", tenant_id=tenant_id)
     notify(s, target.id, "Authority delegated to you",
-           f"You received '{body.authority}' authority for {body.days} days", "action")
+           f"You received '{body.authority}' authority for {body.days} days", "action", tenant_id=tenant_id)
     return _deleg_payload(s, d)
 
 
 @app.get("/api/delegations")
 def list_delegations(ctx=Depends(auth), s=Depends(db)):
     rows = (s.query(Delegation)
-            .filter(or_(Delegation.from_user == ctx["sub"], Delegation.to_user == ctx["sub"]))
+            .filter(Delegation.tenant_id == ctx.get("tenant_id", TENANT),
+                    or_(Delegation.from_user == ctx["sub"], Delegation.to_user == ctx["sub"]))
             .order_by(desc(Delegation.created_at)).all())
     return {"delegations": [_deleg_payload(s, d) for d in rows]}
 
 
 @app.post("/api/delegations/{did}/revoke")
 def revoke_delegation(did: str, ctx=Depends(auth), s=Depends(db)):
-    d = s.query(Delegation).get(did)
+    tenant_id = ctx.get("tenant_id", TENANT)
+    d = s.query(Delegation).filter(Delegation.id == did, Delegation.tenant_id == tenant_id).first()
     if not d:
         raise HTTPException(404, "Not found")
     if d.from_user != ctx["sub"]:
@@ -1839,7 +1869,7 @@ def revoke_delegation(did: str, ctx=Depends(auth), s=Depends(db)):
     p = s.query(Person).get(u.person_id)
     write_audit(s, u.id, p.name if p else u.username, ctx["office_n"],
                 "delegation.revoke", f"deleg:{d.id}", "active", "revoked",
-                "Revoked — stops immediately")
+                "Revoked — stops immediately", tenant_id=tenant_id)
     return _deleg_payload(s, d)
 
 
@@ -2274,12 +2304,22 @@ def read_notification(nid: str, ctx=Depends(auth), s=Depends(db)):
 @app.get("/api/audit")
 def get_audit(limit: int = 60, ctx=Depends(auth), s=Depends(db)):
     tenant_id = ctx.get("tenant_id", TENANT)
-    rows = s.query(AuditLog).filter(AuditLog.tenant_id == tenant_id).order_by(desc(AuditLog.id)).limit(limit).all()
+    if ctx.get("office_n") == 3:
+        ref = (ctx.get("scope_ref") or "").strip()
+        campus = (s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id,
+                  OrgScope.level == "campus", or_(OrgScope.id == ref, OrgScope.name == ref)).limit(2).all())
+        if len(campus) != 1:
+            raise HTTPException(403, "A canonical campus scope is required")
+        rows = (s.query(AuditLog).filter(AuditLog.tenant_id == tenant_id,
+                AuditLog.campus_scope_id == campus[0].id).order_by(desc(AuditLog.id)).limit(limit).all())
+    else:
+        rows = s.query(AuditLog).filter(AuditLog.tenant_id == tenant_id).order_by(desc(AuditLog.id)).limit(limit).all()
     return {"entries": [{"id": r.id, "actor": r.actor_name or r.actor, "office_n": r.office_n,
                          "action": r.action, "entity": r.entity, "new_state": r.new_state,
                          "outcome": r.new_state, "reason": r.reason, "auth_level": r.auth_level,
+                         "campus_scope_id": r.campus_scope_id,
                          "hash": r.hash, "prev_hash": r.prev_hash,
-                         "at": r.created_at.isoformat()} for r in rows]}
+                         "at": r.created_at.isoformat()} for r in rows], "data_status": "available"}
 
 
 @app.get("/api/audit/verify")
@@ -2295,8 +2335,17 @@ def verify_audit(ctx=Depends(auth), s=Depends(db)):
             broken = r.id
             break
         prev = r.hash
-    return {"chain_length": len(rows), "count": len(rows),
-            "intact": broken is None, "broken_at": broken}
+    result = {"chain_length": len(rows), "count": len(rows),
+              "intact": broken is None, "broken_at": broken}
+    if ctx.get("office_n") == 3:
+        ref = (ctx.get("scope_ref") or "").strip()
+        campus = (s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id,
+                  OrgScope.level == "campus", or_(OrgScope.id == ref, OrgScope.name == ref)).limit(2).all())
+        if len(campus) != 1:
+            raise HTTPException(403, "A canonical campus scope is required")
+        result.update({"scope_count": sum(r.campus_scope_id == campus[0].id for r in rows),
+                       "campus_scope_id": campus[0].id, "data_status": "available"})
+    return result
 
 
 # --------------------------------------------------------------------------- #
