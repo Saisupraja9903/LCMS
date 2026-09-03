@@ -94,8 +94,8 @@ export default function RiskIssues() {
     setForm({ ...selected, due_at: selected.due_at ? selected.due_at.slice(0, 16) : '', owner_id: selected.owner_id || '' }); setEditing(true); setCreating(true)
   }
 
-  return <div className="fade-in campus-head-page">
-    <div className="page-head"><div><h1>Risk &amp; Issues</h1><p>Campus-scoped risks, corrective actions, and escalation status.</p></div><button className="btn btn-crimson" onClick={() => { setForm(emptyRisk); setEditing(false); setCreating(true) }}>Create Risk / Issue</button></div>
+  return <div className="fade-in campus-head-page campus-workspace risk-workspace">
+    <header className="campus-workspace-header"><div><span className="eyebrow">Campus / Branch Head</span><h1>Risk &amp; Issues</h1><p>Campus-scoped risks, corrective actions, and escalation status.</p></div><button className="btn btn-crimson" onClick={() => { setForm(emptyRisk); setEditing(false); setCreating(true) }}>Create Risk / Issue</button></header>
     {error && <div className="err-box">{error}</div>}{message && <div className="success-box">{message}</div>}
     <div className="campus-head-metrics risk-summary-metrics">
       <div className="campus-head-metric"><label>Open Risks</label><strong>{summary.open || 0}</strong></div>
@@ -104,7 +104,7 @@ export default function RiskIssues() {
       <div className="campus-head-metric"><label>Escalated</label><strong>{summary.escalated || 0}</strong></div>
       <div className="campus-head-metric"><label>Resolved</label><strong>{summary.resolved || 0}</strong></div>
     </div>
-    <div className="campus-head-panel"><div className="risk-filters">
+    <div className="workspace-filter-bar"><span className="filter-label">Filter register</span><div className="risk-filters">
       <select className="select" value={filters.status} onChange={e => setFilters({ ...filters, status: e.target.value })}><option value="">All statuses</option><option value="OPEN">Open</option><option value="IN_PROGRESS">In progress</option><option value="RESOLVED">Resolved</option><option value="CLOSED">Closed</option></select>
       <select className="select" value={filters.severity} onChange={e => setFilters({ ...filters, severity: e.target.value })}><option value="">All severities</option>{severities.map(value => <option key={value}>{value}</option>)}</select>
       <select className="select" value={filters.category} onChange={e => setFilters({ ...filters, category: e.target.value })}><option value="">All categories</option>{categories.map(value => <option key={value}>{value}</option>)}</select>
