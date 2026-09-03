@@ -43,12 +43,14 @@ def uid() -> str:
 
 
 def write_audit(s, actor, actor_name, office_n, action, entity,
-                prev_state="", new_state="", reason="", auth_level="mfa"):
-    last = s.query(AuditLog).order_by(desc(AuditLog.id)).first()
+                prev_state="", new_state="", reason="", auth_level="mfa",
+                tenant_id=None):
+    tenant = tenant_id or TENANT
+    last = s.query(AuditLog).filter(AuditLog.tenant_id == tenant).order_by(desc(AuditLog.id)).first()
     prev = last.hash if last else "0" * 64
     rec = {"actor": actor, "action": action, "entity": entity, "new_state": new_state}
     h = audit_hash(prev, rec)
-    row = AuditLog(tenant_id=TENANT, actor=actor, actor_name=actor_name, office_n=office_n,
+    row = AuditLog(tenant_id=tenant, actor=actor, actor_name=actor_name, office_n=office_n,
                    action=action, entity=entity, prev_state=prev_state, new_state=new_state,
                    reason=reason, auth_level=auth_level, prev_hash=prev, hash=h)
     s.add(row)
@@ -56,8 +58,9 @@ def write_audit(s, actor, actor_name, office_n, action, entity,
     return row
 
 
-def notify(s, user_id, title, body, severity="info"):
-    s.add(Notification(id=uid(), tenant_id=TENANT, user_id=user_id, severity=severity,
+def notify(s, user_id, title, body, severity="info", tenant_id=None):
+    tenant = tenant_id or TENANT
+    s.add(Notification(id=uid(), tenant_id=tenant, user_id=user_id, severity=severity,
                        title=title, body=body))
     s.commit()
 

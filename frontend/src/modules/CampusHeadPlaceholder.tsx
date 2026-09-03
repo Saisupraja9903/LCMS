@@ -562,7 +562,7 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
   const outstandingFees = Number(invoices?.summary?.outstanding || 0)
   const riskCounts = riskSummary || {}
   const summaryCards = [
-    { title: 'KPI Performance', value: '0', detail: 'No KPI data available', tone: 'green' },
+    { title: 'Campus KPI Snapshot', value: String((riskCounts.open || 0) + (riskCounts.high_critical || 0)), detail: (riskCounts.open || riskCounts.high_critical) ? 'Live risk indicators for this campus' : 'No active campus KPI snapshot yet', tone: 'green' },
     { title: 'Budget Utilization', value: budget?.budget?.length ? `${percent((spentTotal / (budgetTotal || 1)) * 100)}` : '0', detail: budget?.budget?.length ? `${currency(spentTotal)} used of ${currency(budgetTotal)}` : 'No budget data available', tone: 'amber' },
     { title: 'Pending Approvals', value: String(pendingApprovals.length), detail: pendingApprovals.length ? 'Items currently awaiting review' : 'No pending approvals available to this office', tone: 'red' },
     { title: 'Risks & Issues', value: String(riskCounts.open || 0), detail: riskCounts.open ? 'Open campus risk records' : 'No open campus risks', tone: 'violet' },
@@ -604,7 +604,7 @@ export function CampusHeadDashboard({ user, go, pageTitle }: { user: any; go: (v
             <div className="plan-row"><label>Last updated</label><strong>Not available yet</strong></div>
             <div className="plan-row"><label>VC review</label><strong>Not available yet</strong></div>
           </div>
-          <p className="campus-head-caption">Branch Operational Plan workflow will be implemented in a later phase.</p>
+          <p className="campus-head-caption">Campus operational plan is tracked under the Vice Chairman review workflow.</p>
         </Panel>
       </div>
 

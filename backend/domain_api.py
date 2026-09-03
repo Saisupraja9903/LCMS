@@ -180,7 +180,7 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
     require(gate(s, ctx, "analytics", "view")[0])
     # Batches are the same academic-year dimension used by the student risk
     # register. Keeping this source shared makes the dashboard drill-down exact.
-    student_query = _student_scope(s.query(D.Student).filter(D.Student.status == "active"), ctx)
+    student_query = _student_scope(s, s.query(D.Student).filter(D.Student.status == "active"), ctx)
     scoped_students = student_query.all()
     years = sorted({_academic_year_label(row.batch) for row in scoped_students if row.batch}, reverse=True)
     selected_year = academic_year if academic_year in years else ("2026-27" if "2026-27" in years else (years[0] if years else ""))
@@ -1128,10 +1128,17 @@ class StudentIn(BaseModel):
     program_level: str = "UG"
 
 
-def _student_scope(query, ctx):
-    """Apply the authenticated campus scope; never accept campus from the browser."""
+def _student_scope(s, query, ctx):
+    """Apply the authenticated campus scope using the canonical OrgScope record."""
     scope = (ctx.get("scope_ref") or "").strip()
-    if ctx.get("scope_level") == "campus" and scope and not scope.startswith("scope_"):
+    if ctx.get("scope_level") != "campus" or not scope:
+        return query
+    tenant_id = ctx.get("tenant_id", TENANT)
+    campus_query = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id, OrgScope.level == "campus")
+    scope_row = campus_query.filter(OrgScope.id == scope).first() if scope.startswith("scope_") else campus_query.filter(OrgScope.name == scope).first()
+    if scope_row is not None:
+        return query.filter(D.Student.campus == scope_row.name)
+    if not scope.startswith("scope_"):
         return query.filter(D.Student.campus == scope)
     return query
 
@@ -1191,9 +1198,15 @@ def _student_risk_payload(student, backlog, attendance):
 
 
 @router.get("/students")
-def list_students(q: str = "", dept: str = "", program: str = "", academic_year: str = "", study_year: int = Query(0, ge=0), semester: int = Query(0, ge=0), section: str = "", risk: str = "", page: int = Query(1, ge=1), page_size: int = Query(25, ge=10, le=100), ctx=Depends(auth), s=Depends(db)):
+def list_students(q: str = "", dept: str = "", program: str = "", academic_year: str = "", study_year: int = 0, semester: int = 0, section: str = "", risk: str = "", page: int = 1, page_size: int = 25, ctx=Depends(auth), s=Depends(db)):
+    study_year = int(study_year or 0)
+    semester = int(semester or 0)
+    page = int(page or 1)
+    page_size = int(page_size or 25)
+    if page_size < 10: page_size = 10
+    if page_size > 100: page_size = 100
     require(gate(s, ctx, "students", "view")[0])
-    base_query = _student_scope(s.query(D.Student), ctx)
+    base_query = _student_scope(s, s.query(D.Student), ctx)
     scoped_students = base_query.all()
     query = base_query
     # Keep Principal student analytics aligned with the dashboard's current
@@ -1297,7 +1310,7 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
 @router.get("/students/{student_id}/profile")
 def student_profile(student_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "students", "view")[0])
-    student = _student_scope(s.query(D.Student), ctx).filter(D.Student.id == student_id).first()
+    student = _student_scope(s, s.query(D.Student), ctx).filter(D.Student.id == student_id).first()
     if not student:
         raise HTTPException(404, "Student was not found in your authorized campus")
     department = s.query(D.Department).get(student.dept_id)
@@ -2975,13 +2988,13 @@ REPORT_STATUSES = {"DRAFT", "SUBMITTED", "VC_REVIEW", "RETURNED", "RESUBMITTED",
 
 
 def _phase5d_scope(s, ctx):
-    if ctx.get("office_n") not in (1, 2, 3):
+    if ctx.get("office_n") not in (1, 2, 3, 4):
         raise HTTPException(403, "This action is restricted to authorized escalation/report offices")
     tenant_id = ctx.get("tenant_id", TENANT)
     query = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id, OrgScope.level == "campus")
     ref = (ctx.get("scope_ref") or "").strip()
     scope = query.filter(OrgScope.id == ref).first() if ref.startswith("scope_") else query.filter(OrgScope.name == ref).first()
-    if ctx.get("office_n") == 3 and not scope:
+    if ctx.get("office_n") in (3, 4) and not scope:
         raise HTTPException(403, "A canonical campus scope is required")
     return scope
 
@@ -2998,7 +3011,9 @@ def _escalation_destination(s, source_type, source_ref, priority, ctx):
         risk, _ = _risk_or_404(s, source_ref, ctx)
         category = risk.category
     if priority == "CRITICAL":
-        if category in ("Safety", "Compliance", "Administration", "Operations"):
+        if category == "Operations":
+            return 2, "Vice Chairman", [4]
+        if category in ("Safety", "Compliance", "Administration"):
             return 1, "Chairman", [2]
         return 2, "Vice Chairman", [4]
     if priority == "HIGH":
@@ -3145,7 +3160,11 @@ def update_escalation(escalation_id: str, body: EscalationUpdateIn, ctx=Depends(
 
 
 def _change_escalation(escalation_id, target, event_type, body, ctx, s):
-    action = "submit" if target == "SUBMITTED" else "follow_up" if target == "FOLLOW_UP" else "resolve" if target == "RESOLVED" else "close"
+    action = ("submit" if target == "SUBMITTED" else
+              "receive" if target == "RECEIVED" else
+              "follow_up" if target == "FOLLOW_UP" else
+              "resolve" if target == "RESOLVED" else
+              "close")
     decision = _phase5d_gate(s, ctx, "escalations", action)
     row = _escalation_or_404(s, escalation_id, ctx); previous = row.status
     allowed = {"SUBMITTED": {"DRAFT"}, "RECEIVED": {"SUBMITTED"}, "FOLLOW_UP": {"RECEIVED", "SUBMITTED"}, "RESOLVED": {"FOLLOW_UP", "RECEIVED", "SUBMITTED"}, "CLOSED": {"RESOLVED"}}
@@ -3175,7 +3194,7 @@ def submit_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(aut
 
 @router.post("/escalations/{escalation_id}/receive")
 def receive_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
-    if ctx.get("office_n") not in (1, 2, 4): raise HTTPException(403, "Only the configured receiving office may receive this escalation")
+    if ctx.get("office_n") not in (1, 2, 3, 4): raise HTTPException(403, "Only the configured receiving office may receive this escalation")
     return _change_escalation(escalation_id, "RECEIVED", "receive", body, ctx, s)
 
 

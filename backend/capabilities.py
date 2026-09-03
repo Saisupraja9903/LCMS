@@ -152,7 +152,7 @@ MODULE_ACTIONS = {
                      "corrective_action": "create", "corrective_update": "edit",
                      "resolve": "edit", "close": "edit", "escalate": "approve"},
         "escalations": {"view": "view", "create": "create", "edit": "edit", "submit": "submit",
-                                        "follow_up": "edit", "resolve": "edit", "close": "edit"},
+                                        "receive": "receive", "follow_up": "edit", "resolve": "edit", "close": "edit"},
         "campus_reports": {"view": "view", "create": "create", "edit": "edit", "submit": "submit",
                                              "resubmit": "submit", "review": "review", "return": "edit", "approve": "approve"},
 }
@@ -218,6 +218,7 @@ ACTION_OFFICE_ALLOW = {
     ("grievance", "investigate"): {8, 20, 21},
     ("governance", "publish_policy"): {1, 2, 40},
     ("governance", "edit_dashboard"): {1, 2, 40},
+    ("escalations", "receive"): {1, 2, 3, 4},
     ("admin", "configure"): {27, 28},
 }
 

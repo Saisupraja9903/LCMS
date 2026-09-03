@@ -52,7 +52,7 @@ def rbac_for(office_n: int, level: int, verb: str) -> str:
     if verb in row:
         return row[verb]
     # Sensible defaults for verbs not in the 12-column representative matrix.
-    if verb in ("submit", "review", "assign", "upload", "print", "download"):
+    if verb in ("submit", "receive", "review", "assign", "upload", "print", "download"):
         return LIMITED if level <= 7 else VIEW
     if verb in ("lock", "unlock", "override"):
         return LIMITED if office_n in (16, 27, 28) else NOT_ALLOWED

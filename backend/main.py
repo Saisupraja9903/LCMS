@@ -2247,18 +2247,21 @@ def my_permissions(ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @app.get("/api/notifications")
 def get_notifications(ctx=Depends(auth), s=Depends(db)):
-    rows = (s.query(Notification).filter(Notification.user_id == ctx["sub"])
+    tenant_id = ctx.get("tenant_id", TENANT)
+    rows = (s.query(Notification).filter(Notification.user_id == ctx["sub"], Notification.tenant_id == tenant_id)
             .order_by(desc(Notification.created_at)).limit(50).all())
     return {"notifications": [{"id": n.id, "severity": n.severity, "title": n.title,
                                "body": n.body, "read": n.read,
                                "at": n.created_at.isoformat()} for n in rows],
             "unread": s.query(Notification).filter(Notification.user_id == ctx["sub"],
+                                                   Notification.tenant_id == tenant_id,
                                                    Notification.read == False).count()}
 
 
 @app.post("/api/notifications/{nid}/read")
 def read_notification(nid: str, ctx=Depends(auth), s=Depends(db)):
-    n = s.query(Notification).get(nid)
+    tenant_id = ctx.get("tenant_id", TENANT)
+    n = s.query(Notification).filter(Notification.id == nid, Notification.tenant_id == tenant_id).first()
     if n and n.user_id == ctx["sub"]:
         n.read = True
         s.commit()
@@ -2270,7 +2273,8 @@ def read_notification(nid: str, ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @app.get("/api/audit")
 def get_audit(limit: int = 60, ctx=Depends(auth), s=Depends(db)):
-    rows = s.query(AuditLog).order_by(desc(AuditLog.id)).limit(limit).all()
+    tenant_id = ctx.get("tenant_id", TENANT)
+    rows = s.query(AuditLog).filter(AuditLog.tenant_id == tenant_id).order_by(desc(AuditLog.id)).limit(limit).all()
     return {"entries": [{"id": r.id, "actor": r.actor_name or r.actor, "office_n": r.office_n,
                          "action": r.action, "entity": r.entity, "new_state": r.new_state,
                          "outcome": r.new_state, "reason": r.reason, "auth_level": r.auth_level,
@@ -2280,7 +2284,8 @@ def get_audit(limit: int = 60, ctx=Depends(auth), s=Depends(db)):
 
 @app.get("/api/audit/verify")
 def verify_audit(ctx=Depends(auth), s=Depends(db)):
-    rows = s.query(AuditLog).order_by(AuditLog.id).all()
+    tenant_id = ctx.get("tenant_id", TENANT)
+    rows = s.query(AuditLog).filter(AuditLog.tenant_id == tenant_id).order_by(AuditLog.id).all()
     prev = "0" * 64
     broken = None
     for r in rows:

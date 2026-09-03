@@ -11,7 +11,7 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 from database import SessionLocal, TENANT
-from models import AuditLog, Notification, WorkflowInstance
+from models import AuditLog, Notification, OrgScope, WorkflowInstance
 import domain_api
 import domain_models as D
 
@@ -129,6 +129,28 @@ class Phase5DEscalationReportTests(unittest.TestCase):
         self.assertIn("unavailable", payload)
         self.assertTrue(self.session.query(AuditLog).filter(AuditLog.entity == f"report:{report['id']}").count() >= 4)
         self.assertTrue(self.session.query(Notification).filter(Notification.body.like(f"%report:{report['id']}%")).count() >= 1)
+
+    def test_campus_head_receive_scope_and_routing_regressions(self):
+        main_campus = self.session.query(OrgScope).get("scope_main_campus")
+        if main_campus is None:
+            self.skipTest("Main campus scope seed missing")
+        self.session.add(D.Student(id=f"student_scope_main_{datetime.utcnow().strftime('%H%M%S%f')}", tenant_id=TENANT, roll_no="SMAIN01", name="Main Campus Student", email="main@example.com", dept_id=None, program_id=None, campus="Main Campus", batch="2025", semester=1, section="A", status="active", cgpa=8.5))
+        self.session.add(D.Student(id=f"student_scope_north_{datetime.utcnow().strftime('%H%M%S%f')}", tenant_id=TENANT, roll_no="SNORTH01", name="North Campus Student", email="north@example.com", dept_id=None, program_id=None, campus="North Campus", batch="2025", semester=1, section="A", status="active", cgpa=7.5))
+        self.session.commit()
+        scoped = domain_api.list_students(ctx={**self.campus_ctx, "scope_ref": "scope_main_campus"}, s=self.session)
+        self.assertTrue(scoped["students"])
+        self.assertTrue(all(student.get("campus") in (None, "Main Campus") for student in scoped["students"]))
+        self.assertFalse(any(student.get("campus") == "North Campus" for student in scoped["students"]))
+
+        risk = self.create_risk(category="Operations", severity="CRITICAL")
+        created = domain_api.create_escalation(domain_api.EscalationCreateIn(source_type="risk", source_ref=risk["id"], reason="Operations alert", priority="CRITICAL", owner_id="user_4"), ctx=self.campus_ctx, s=self.session)["escalation"]
+        self.escalation_ids.append(created["id"])
+        self.assertEqual(created["destination_office_n"], 2)
+
+        submitted = domain_api.submit_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Draft ready"), ctx=self.campus_ctx, s=self.session)["escalation"]
+        self.assertEqual(submitted["status"], "SUBMITTED")
+        received = domain_api.receive_escalation(created["id"], domain_api.Phase5DReasonIn(reason="Received"), ctx=self.campus_ctx, s=self.session)["escalation"]
+        self.assertEqual(received["status"], "RECEIVED")
 
     def test_report_cross_tenant_access_is_rejected(self):
         report = self.create_report()
